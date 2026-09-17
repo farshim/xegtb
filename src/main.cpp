@@ -674,6 +674,72 @@ int cmdSelftest(int argc, char** argv) {
         }
         std::printf("\n");
     }
+    // ---- the capture-rules solvers -------------------------------------
+    // Two properties that comparing values against another solver cannot
+    // establish, because both solvers would share the fault:
+    //   * thread invariance -- a race shows up as a result that depends on the
+    //     thread count or on the run, not as a number that looks wrong;
+    //   * D4 orbit consistency -- every symmetry image of a position must
+    //     carry the same value.  This is the premise the reduced index rests
+    //     on, and the one the frontier's orbit wake-ups assume.
+    {
+        std::printf("== capture rules: thread invariance and D4 orbit consistency ==\n");
+        struct Cfg { const char* name; int W, B, pw, pb, n; };
+        const Cfg cfgs[] = {
+            { "KK v K",   2, 1, CP_KING,  CP_KING,    8 },
+            { "KKK v K",  3, 1, CP_KING,  CP_KING,    7 },
+            { "KKK v KK", 3, 2, CP_KING,  CP_KING,    6 },
+            { "RR v R",   2, 1, CP_ROOK,  CP_ROOK,    8 },
+            { "RR v N",   2, 1, CP_ROOK,  CP_KNIGHT,  8 },
+            { "QQ v B",   2, 1, CP_QUEEN, CP_BISHOP,  8 },
+        };
+        for (const Cfg& c : cfgs) {
+            const int n = std::min(c.n, maxN);
+            if (n < 3) continue;
+            auto census = [&](int thr, KingsStats& out) {
+                TableKings t(n, c.W, c.B, c.pw, c.pb);
+                t.generate(thr, false);
+                t.census(thr, false);
+                out = t.stats();
+            };
+            KingsStats sa, sb;
+            census(std::max(2, gThreads), sa);
+            census(1, sb);
+            const bool inv = sa.wWin == sb.wWin && sa.wDraw == sb.wDraw && sa.wLoss == sb.wLoss
+                          && sa.bWin == sb.bWin && sa.bDraw == sb.bDraw && sa.bLoss == sb.bLoss
+                          && sa.deepestWhite == sb.deepestWhite && sa.deepestBlack == sb.deepestBlack;
+
+            TableKings t(n, c.W, c.B, c.pw, c.pb);
+            t.generate(gThreads, false);
+            Geometry gm(n);
+            unsigned seed = 2463534242u;
+            auto rnd = [&]() { seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5; return seed; };
+            U64 checked = 0, orbBad = 0;
+            for (int trial = 0; trial < 40; ++trial) {
+                std::vector<Sq> used;
+                while ((int)used.size() < c.W + c.B) {
+                    Sq q = (Sq)(rnd() % (unsigned)(n * n));
+                    if (std::find(used.begin(), used.end(), q) == used.end()) used.push_back(q);
+                }
+                std::vector<Sq> wq(used.begin(), used.begin() + c.W), bq(used.begin() + c.W, used.end());
+                const int16_t vw = t.probe(wq, bq, true), vb = t.probe(wq, bq, false);
+                for (int gi = 1; gi < 8; ++gi) {
+                    std::vector<Sq> iw, ib;
+                    for (Sq x : wq) iw.push_back(gm.image(gi, x));
+                    for (Sq x : bq) ib.push_back(gm.image(gi, x));
+                    ++checked;
+                    if (t.probe(iw, ib, true) != vw || t.probe(iw, ib, false) != vb) ++orbBad;
+                }
+            }
+            const bool ok = inv && !orbBad;
+            std::printf("%-9s n=%2d  threads 1 vs %d: %-9s  D4 orbits: %llu images, %llu inconsistent  %s\n",
+                        c.name, n, std::max(2, gThreads), inv ? "identical" : "DIFFER",
+                        (unsigned long long)checked, (unsigned long long)orbBad, ok ? "ok" : "FAIL");
+            if (!ok) ++failures;
+        }
+        std::printf("\n");
+    }
+
     std::printf("%s\n", failures ? "SELFTEST FAILED" : "selftest passed");
     return failures ? 1 : 0;
 }

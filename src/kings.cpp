@@ -1250,33 +1250,54 @@ static U64 bruteCheck(const Suite& S, int W, int B) {
     auto find = [&](U64 k) { return (size_t)(std::lower_bound(sorted.begin(), sorted.end(), k) - sorted.begin()); };
     std::vector<S16> val(sorted.size(), UNK);
 
-    std::vector<Mv> mvs;
+    // A state's own row never moves, so look it up once rather than once per
+    // sweep.  Successors still go through the binary search, which is what
+    // keeps this free of the index it is meant to be checking.
+    std::vector<uint32_t> slotOf(allPos.size());
+    for (size_t i = 0; i < allPos.size(); ++i) slotOf[i] = (uint32_t)find(allKeys[i]);
+
+    const int nthr = std::max(1, (int)std::thread::hardware_concurrency());
     for (int k = 1;; ++k) {
-        U64 ch = 0; int pend = 0;
-        for (size_t i = 0; i < allPos.size(); ++i) {
-            size_t at = find(allKeys[i]);
-            if (val[at] != UNK) continue;
-            genMoves(g, allPos[i].first, allPos[i].second, stms[i], mvs);
-            Acc a;
-            for (const Mv& M : mvs) {
-                if (M.ends) { a.winNow(); continue; }
-                a.add(val[find(enc(M.W, M.B, 1 - stms[i]))]);
+        std::atomic<U64> ch{0};
+        std::atomic<int> pend{0};
+        auto worker = [&](size_t lo, size_t hi) {
+            std::vector<Mv> mvs;
+            U64 loc = 0; int locPend = 0;
+            for (size_t i = lo; i < hi; ++i) {
+                const size_t at = slotOf[i];
+                if (ld16(val.data(), at) != UNK) continue;
+                genMoves(g, allPos[i].first, allPos[i].second, stms[i], mvs);
+                Acc a;
+                for (const Mv& M : mvs) {
+                    if (M.ends) { a.winNow(); continue; }
+                    a.add(ld16(val.data(), find(enc(M.W, M.B, 1 - stms[i]))));
+                }
+                S16 nv;
+                if (a.best && a.best <= k)      nv = (S16)a.best;
+                else if (a.best)                { if (a.best > locPend) locPend = a.best; nv = UNK; }
+                else if (a.anyUnknown)          nv = UNK;
+                else if (!a.moves || a.anyDraw) nv = 0;
+                else                            nv = (S16)-a.worst;
+                if (nv != UNK) { st16(val.data(), at, nv); ++loc; }
             }
-            S16 nv;
-            if (a.best && a.best <= k)      nv = (S16)a.best;
-            else if (a.best)                { if (a.best > pend) pend = a.best; nv = UNK; }
-            else if (a.anyUnknown)          nv = UNK;
-            else if (!a.moves || a.anyDraw) nv = 0;
-            else                            nv = (S16)-a.worst;
-            if (nv != UNK) { val[at] = nv; ++ch; }
+            ch += loc;
+            int cur = pend.load();
+            while (locPend > cur && !pend.compare_exchange_weak(cur, locPend)) {}
+        };
+        std::vector<std::thread> th;
+        const size_t chunk = (allPos.size() + nthr - 1) / nthr;
+        for (int q = 0; q < nthr; ++q) {
+            size_t lo = std::min(q * chunk, allPos.size()), hi = std::min(lo + chunk, allPos.size());
+            if (lo < hi) th.emplace_back(worker, lo, hi);
         }
-        if (!ch && pend <= k) break;
+        for (auto& x : th) x.join();
+        if (!ch.load() && pend.load() <= k) break;
     }
     for (auto& x : val) if (x == UNK) x = 0;
 
     U64 bad = 0;
     for (size_t i = 0; i < allPos.size(); ++i) {
-        S16 mine = val[find(allKeys[i])];
+        S16 mine = val[slotOf[i]];
         S16 theirs = S.look(allPos[i].first, allPos[i].second, stms[i]);
         if (mine != theirs) ++bad;
     }
