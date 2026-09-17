@@ -1,0 +1,56 @@
+endgame               KRK  (white has a rook)
+board                 16 x 16
+king pairs (canonical)          7980
+piece placements                 256   per king pair
+entries per side             2042880   (3.90 MiB in RAM for both sides)
+
+-- symmetry classes ------------------------------------------
+white to move   legal        1780975   win        1780975   draw            0
+black to move   legal        2014320  loss        1957512   draw        56808
+                 mate            119  stalemate        17   rook en prise      56791
+
+-- whole board (no symmetry reduction) -----------------------
+white to move   legal       14241920   win       14241920   draw            0
+black to move   legal       16108680  loss       15654948   draw       453732
+                 mate            952  stalemate       132   rook en prise     453600
+
+longest win  69 plies = mate in 35
+  example    wK=a1 wR=g6 bK=h7, white to move
+
+mate-in-N distribution (white to move, whole board)
+  mate in   1             14280  (1785 classes)
+  mate in   2             37796  (4731 classes)
+  mate in   3             38156  (4776 classes)
+  mate in   4              6508  (814 classes)
+  mate in   5             21296  (2663 classes)
+  mate in   6             40868  (5115 classes)
+  mate in   7             48952  (6126 classes)
+  mate in   8             79660  (9964 classes)
+  mate in   9            120328  (15048 classes)
+  mate in  10            149496  (18694 classes)
+  mate in  11            189052  (23635 classes)
+  mate in  12            243684  (30474 classes)
+  mate in  13            312152  (39027 classes)
+  mate in  14            408324  (51054 classes)
+  mate in  15            528272  (66048 classes)
+  mate in  16            629364  (78688 classes)
+  mate in  17            711136  (88902 classes)
+  mate in  18            735988  (92020 classes)
+  mate in  19            828708  (103605 classes)
+  mate in  20            901504  (112715 classes)
+  mate in  21            966088  (120780 classes)
+  mate in  22           1003488  (125474 classes)
+  mate in  23            971652  (121495 classes)
+  mate in  24            882148  (110305 classes)
+  mate in  25            826188  (103311 classes)
+  mate in  26            817488  (102239 classes)
+  mate in  27            672564  (84113 classes)
+  mate in  28            608552  (76133 classes)
+  mate in  29            509276  (63704 classes)
+  mate in  30            376808  (47152 classes)
+  mate in  31            273008  (34164 classes)
+  mate in  32            177460  (22214 classes)
+  mate in  33             96056  (12035 classes)
+  mate in  34             15272  (1924 classes)
+  mate in  35               348  (48 classes)
+

@@ -1,0 +1,2579 @@
+# kqk-egtb — a bare king against king and pieces, on an *n* × *n* board
+
+A dependency-free C++20 library and command-line tool that builds **complete
+depth-to-mate endgame tablebases on a square board of any size**, using
+parallel retrograde analysis. Six endgames share one solver:
+
+| | White has | 8 × 8 deepest win | largest board that fits in 16 GB |
+|---|---|---:|---:|
+| **KQK** | king and queen | mate in 10 | *n* = 60 |
+| **KRK** | king and rook | mate in 16 | *n* = 54 |
+| **KBBK** | king and two bishops | mate in 19 | *n* = 22 |
+| **KBNK** | king, bishop and knight | mate in 33 | *n* = 19 * |
+| **KNK** | king and knight | *no mate exists* | *n* = 60 |
+| **KNNK** | king and two knights | mate in 1 | *n* = 16 |
+
+All of these share one solver. Black has a lone king in every case, which is what
+every design decision below rests on. White's men enter the program in exactly
+three places: how each moves, how many there are, and whether they are alike.
+A rook is a queen restricted to the four orthogonal rays; a bishop is one
+restricted to the four diagonal rays; a knight jumps instead. KBBK and KBNK add
+a second placement dimension to the index — unordered for the two like bishops,
+ordered for the bishop and knight, which are told apart.
+
+\* KBNK is the one endgame whose limit is not memory: its depths outgrow the
+one-byte entry before its table outgrows 16 GB. See §5.
+
+Three further endgames have solvers of their own, because in none of them is
+Black bare: **KQKR**, where Black has a rook, **KQKK**, where Black has a
+second *king* — the two black kings may stand beside each other but not beside
+the white king, and a mate counts only when both of them are mated at once.
+Both are in §5. KQKK turns out to be *easier* than KQK: White wins every legal
+position and the 8 × 8 mate is in 7 rather than 10 — until the mate rule is
+replaced by the capture rule it stands for, under which the same material is a
+real fight that White wins two thirds of and can lose. And **KKK vs KK**, which
+is that rule set with the queen deleted: nothing on the board but kings, all of
+them capturable, material falling on both sides, and White winning from every
+placement with the move. Also in §5.
+
+Every table is checked three ways: each entry is re-derived from its successors
+by an independent forward move generator, small boards are compared position by
+position against a separate unreduced solver that uses no symmetry at all, and
+the 8 × 8 KQK case is checked against the published figures.
+
+```
+$ ./egtb gen -n 8 -o kqk8.kqk
+longest win  19 plies = mate in 10
+$ ./egtb longest -f kqk8.kqk
+wK=a1 wQ=b2 bK=f5, white to move: white wins, mate in 10 (19 plies)
+1. Kb1 Ke6 2. Kc2 Kf5 3. Kd3 Ke6 4. Ke4 Kd6 5. Qc2 Ke6 6. Qc6 Kf7
+7. Kf5 Kg7 8. Qd7 Kh8 9. Kg6 Kg8 10. Qg7#
+
+$ ./krk gen -n 8 -o krk8.krk            # same binary, --endgame krk
+longest win  31 plies = mate in 16
+$ ./krk longest -f krk8.krk
+wK=a1 wR=b2 bK=c3, white to move: white wins, mate in 16 (31 plies)
+1. Kb1 Kd4 2. Kc2 Ke4 3. Kc3 Ke5 4. Kd3 Kf5 5. Kd4 Kf6 6. Ke4 Ke6
+7. Rb6 Ke7 8. Kd5 Kf7 9. Ke5 Kg7 10. Kf5 Kf7 11. Re6 Kg7 12. Rf6 Kh7
+13. Rg6 Kh8 14. Kf6 Kh7 15. Kf7 Kh8 16. Rh6#
+
+$ ./kbbk gen -n 8 -o kbbk8.kbbk
+longest win  37 plies = mate in 19
+$ ./kbbk longest -f kbbk8.kbbk
+wK=a1 wB1=d1 wB2=h4 bK=d2, white to move: white wins, mate in 19 (37 plies)
+1. Bd1-f3 Ke3 2. Bf3-c6 Kf4 3. Kb2 Kg4 4. Bh4-f2 Kh5 5. Kc3 Kg6 6. Kd4 Kf6
+7. Ke4 Kf7 8. Kf5 Ke7 9. Ke5 Kf7 10. Bf2-h4 Kg7 11. Kf5 Kh6 12. Bc6-d7 Kh7
+13. Kf6 Kh6 14. Kf7 Kh5 15. Bh4-e7 Kh6 16. Bd7-g4 Kh7 17. Be7-f8 Kh8
+18. Bf8-g7 Kh7 19. Bg4-f5#
+
+$ ./kbnk gen -n 8 -o kbnk8.kbnk
+longest win  65 plies = mate in 33
+$ ./kbnk longest -f kbnk8.kbnk
+wK=a1 wB=e1 wN=h6 bK=c1, white to move: white wins, mate in 33 (65 plies)
+1. Ka2 Kd1 2. Be1-f2 Kc2 3. Ka3 Kd2 4. Kb3 Ke2 5. Bf2-c5 Kf3 6. Kc4 Ke4
+... 30. Kd2 Ka2 31. Kc2 Ka1 32. Bc1-b2 Ka2 33. Na4-c3#
+
+$ ./egtb kqkk -n 8 --line       # a queen against TWO black kings; its own command
+  n   entries/side     white wins          draws    deepest  seconds  checks
+  8         806400        2534392              0     13 ply     0.08
+      deepest white win: wK=a1 wQ=d1 bK=f5 bK=f6 -- mate in 7
+      1. Ka1-b1 kf5-g6 2. Kb1-c2 kg6-f7 3. Qd1-d5 kf7-g7 4. Qd5-h5 kg7-g8
+      5. Qh5-h6 kf6-f7 6. Kc2-d2 kf7-e8 7. Qh6-g6#
+```
+
+---
+
+## 1. What the 8 × 8 state of the art looks like, and what carries over
+
+Endgame tablebases have been built the same way since Ströhlein (1970) and Ken
+Thompson's databases (1991): **retrograde analysis**, i.e. backward induction
+from mate. The families that followed differ mainly in what they store and how
+they pack it.
+
+| family | metric | notes |
+|---|---|---|
+| Thompson (1991) | DTC (depth to conversion) | first widely used 5-piece sets |
+| Edwards (1994) | DTM | first with an index for both sides to move |
+| Nalimov (1998) | DTM | the long-time standard; 6-piece set ≈ 1.2 TiB |
+| Gaviota (2008) | DTM | open probing code, better compression, 5 pieces |
+| Scorpio (2005) | WDL | 2 bits per position, for search cut-offs |
+| **Syzygy** (2013 / 2018) | WDL + DTZ50 | current standard, 7 pieces ≈ 17 TB |
+| Lomonosov (2012) | DTM | all 7-piece DTM, ≈ 140 TiB, never distributed |
+
+Three ideas from that line are the ones that matter here, and all three
+generalise cleanly from 8 to *n*:
+
+1. **Backward induction from mate**, with an *unmove* generator whose rules
+   are the mirror image of the usual ones: it is illegal to *start* in check
+   but legal to un-move *into* check, and an un-move may leave a captured
+   piece behind on the square it came from.
+2. **A bijective index** from position to array offset, with illegal
+   configurations squeezed out. Syzygy's `MapKK` enumerates the **462** legal,
+   canonical king pairs on 8 × 8; this program computes that same 462 from
+   first principles and generalises it to any *n* (see §3).
+3. **Symmetry reduction.** With no pawns the board has the full dihedral
+   symmetry group *D*₄ of order 8, so roughly seven eighths of the table is
+   redundant.
+
+What is *dropped* here, deliberately: pawns (so no DTZ/DTZ50 and no half-board
+symmetry), captures other than Black taking one of White's pieces, promotion,
+castling, and the 50-move rule. In each of these endgames every conversion —
+...K×Q, ...K×R, ...K×B — leaves material that cannot mate, so it is an
+immediate and permanent draw. That single fact is what makes the whole problem
+tractable and is used throughout. It is also the exact boundary of what this
+program can do: see §2.
+
+Sources: [Retrograde Analysis](https://chessprogramming.org/Retrograde_Analysis),
+[Endgame Tablebases](https://chessprogramming.org/Endgame_Tablebases),
+[Syzygy Bases](https://chessprogramming.org/Syzygy_Bases),
+[syzygy1/tb generator](https://github.com/syzygy1/tb),
+[Analysis of the KQK endgame](https://en.wikibooks.org/wiki/Chess/Analysis_of_KQK_Endgame).
+
+---
+
+## 2. The structure that makes these endgames cheap
+
+Black has a lone king. Four consequences drive every design decision below, and
+**not one of them mentions which piece White has** — they hold verbatim for KQK
+and KRK, which is why the two share a solver.
+
+* **Black can never give check**, so a white-to-move position is never
+  checkmate and never a loss. Every entry on the white side is *win or draw*;
+  every entry on the black side is *loss or draw*. The backward induction is a
+  strict two-phase alternation instead of a general fixed point.
+* **White can never capture**, and Black can capture only White's pieces. So no
+  position inside the table ever has a predecessor outside it: **the unmove
+  generator needs no un-captures at all.**
+* **A legal capture is an immediate, permanent draw.** Taking the lone queen or
+  rook leaves bare kings; taking one of the two bishops leaves KBK, which is
+  also drawn. Those positions are settled during initialisation, before any
+  search — on 8 × 8 that is 22 176 positions in KQK and KRK alike, and
+  necessarily the same number in both: "Black may take the piece" says only
+  that it stands next to the black king undefended, which does not depend on
+  what the piece is.
+* **King, queen, rook and bishop movement are all symmetric relations** (*u*
+  attacks *v* iff *v* attacks *u*). The unmove generator is therefore the
+  ordinary move generator run from the destination square, with the legality
+  tests transposed.
+
+### Where this stops working
+
+The third bullet is the sharp edge, and it is worth being precise about,
+because it is *not* a statement about how many pieces White has.
+
+**KRRK looks like KBBK and is not.** Taking one rook leaves KRK, which White
+wins — so a KRRK table cannot be built without the KRK table it converts into,
+and the whole "no un-captures, no conversion, one self-contained table"
+architecture goes away. The same rules out KQQK, KQRK and every other
+two-piece material except the two bishops and the bishop-and-knight, where
+both captures (…K×B leaving KNK, …K×N leaving KBK) are drawn. `Material` in
+`geometry.hpp` states this invariant and lists which endgames satisfy it;
+nothing checks it at runtime, because the endgames are enumerated rather than
+composed.
+
+**KNNNK is the same edge, and much finer.** Three knights against a bare king
+look exactly like KBBK — Black stays bare, every man moves symmetrically, one
+capture is available — and the endgame still does not qualify, for a reason
+that is easy to get backwards. Two knights cannot *force* mate; they can
+*mate*. K+N+N vs K contains **120 mate positions on 8 × 8**, exactly 16*n* − 8
+on every board from 4 × 4 up. So …K×N does not always leave a draw, and KNNNK
+has to read the value out of a KNNK table rather than assume it. §5 has what
+that buys.
+
+Two levels down the invariant does hold, and in its strongest form: **KNK
+contains no mate at all** — not "no forced mate", no placement whatever of
+white king, knight and black king in which Black is mated, verified
+exhaustively for every board from 3 × 3 to 24 × 24. Its only terminal is
+stalemate, and there are exactly 40 of those on every board from 4 × 4 up, all
+with the black king in a corner.
+
+**KQKR** breaks the *first* bullet instead: there Black has a rook, so Black
+can give check and mate, the strict two-phase alternation becomes a general
+fixed point, and the counter-free argument for phase B below has to be
+revisited. Note that the piece count is not what matters — KBNK has three
+white men and is fine, because *Black* is still bare.
+
+**KQKK under capture rules breaks all four**, which is the sharpest
+illustration of what the four are worth. Take away check and mate, make every
+king an ordinary capturable man, and let a player win by capturing all of the
+opponent's: Black can now give check (he can take the white king), White can
+now capture (a black king), and no capture is a draw any more — one leaves K + Q vs K, which White wins, the other leaves
+K vs K + K, which *Black* wins. Signed entries, three conversions and a
+bucketed induction all follow; §5 and `src/kqkkcap.cpp`.
+
+**KQKK under the mating rules breaks none of them, and changes the index
+instead.** Give Black a
+second king and every bullet survives: a black king may not stand beside the
+white one, so Black still cannot give check; kings cannot be taken, so White
+still cannot capture; …K×Q still leaves material that cannot mate; and a king
+still moves symmetrically. So KQKK gets the same two-phase alternation, the
+same one-byte entries and the same counter-free phase B as KQK. What it cannot
+share is the *index*, because Black's second man is a king: interchangeable
+with the first, and moving on Black's turn rather than White's. See §3.
+
+---
+
+## 3. Indexing
+
+A position is (white king, black king, White's *piece configuration*, side to
+move) on *n*² squares. **The index does not depend on which pieces those are,
+only on how many**, so KQK and KRK share an index exactly and KBBK has its own.
+
+The naive size for a three-man endgame is 2*n*⁶ — 1.4 × 10¹¹ entries at
+*n* = 64. Two reductions bring that down by roughly a factor of eight, and a
+third makes the memory layout cache-friendly.
+
+**Fundamental domain.** *D*₄ acts on the board; the closed triangle
+{ 2*f* ≤ *n*−1, 2*r* ≤ *n*−1, *r* ≤ *f* } meets every orbit of squares exactly
+once. It has ⌊*n*(*n*+2)/8⌋ squares — 10 of the 64 on a chessboard. The white
+king is placed there.
+
+**Canonical representative.** Among the group elements *g* that carry the white
+king into the triangle, take the one minimising the pair (*g*·bK, *g*·piece).
+When the white king lies off every symmetry axis, exactly one *g* qualifies and
+the choice is free; when it lies on one, the tie-break is what breaks the
+residual symmetry. This is the same reduction Syzygy performs with `MapKK` and
+`MapA1D1D4`, derived rather than tabulated, and on 8 × 8 it reproduces the
+familiar **462** canonical king pairs exactly.
+
+**Piece configurations.** With one white piece a configuration is just its
+square, so there are *n*² of them. With two pieces it is the pair of squares
+they stand on — and whether that pair is ordered is the whole question:
+
+* **Two alike** (KBBK): the **unordered** pair, *n*²(*n*²−1)/2 of them. Storing
+  the ordered pair would double the table and give every position a twin
+  saying the same thing, because two bishops are indistinguishable.
+* **Two unalike** (KBNK): the **ordered** pair, *n*⁴ of them, of which the *n*²
+  with both pieces on one square are dead. A bishop and a knight are told
+  apart, so the order carries information. The encoding is then the plain
+  mixed-radix one, which needs no tables and no division on the hot path, and
+  wastes only that 1-in-*n*² diagonal.
+
+That is what makes the four-man tables four-man:
+
+| | placements per king pair, *n* = 8 | entries / side, *n* = 8 | *n* = 20 |
+|---|---:|---:|---:|
+| KQK, KRK | 64 | 29 568 | 7 866 000 |
+| KBBK | 2 016 | 931 392 | 1 569 267 000 |
+| KBNK | 4 096 | 1 892 352 | 3 146 400 000 |
+
+so the same 16 GB reaches *n* = 60 for one piece, *n* = 22 for two alike and
+*n* = 20 for two unalike.
+
+Leaving the diagonal live rather than squeezing it out was a real bug, not a
+harmless waste — see §7.
+
+**Layout.** The index is
+
+```
+    entry = kk_index(white king, black king) * npc  +  configuration
+```
+
+with the two sides to move held in **two separate arrays**, not interleaved.
+`kk_index` is a dense enumeration of legal canonical king pairs (kings neither
+coincident nor touching, black king minimal under the stabiliser of the white
+king). The point of putting the configuration last is that **all placements of
+White's pieces for one king pair are contiguous**, and retracting a move of one
+of those pieces never changes the king pair — so the inner loop of the
+retrograde pass, which is where almost all the work is, walks a single
+contiguous block. That holds just as well for two pieces as for one.
+
+**A king triple, for KQKK.** The one endgame here whose block key is not a
+king pair is KQKK, where Black has two kings. Keying on (white king, one black
+king) and putting the other black king in the configuration would give every
+position two indices saying the same thing, and would put a man that moves on
+*Black's* turn inside the block phase A is trying to hold still. The key is
+instead the king **triple** — white king in the fundamental triangle, unordered
+pair of black kings, canonical under the stabiliser of the white king — and the
+configuration is the queen square alone, so npc = *n*²:
+
+```
+    entry = triple_index(white king, {black king, black king}) * n^2  +  queen
+```
+ Both of the properties
+above come back: the black kings are unordered at the level of the index, so
+the table holds one entry per position rather than two, and undoing a queen
+move still never leaves the block. What leaves the block instead is a black
+king move, which is phase B's business, exactly as it is in the pair index. The
+codec is `src/indexkk.hpp`, and a table is about *n*⁸/16 entries per side.
+
+Entries are one byte: 0…250 is the depth to mate in plies, and 251/252/253 mark
+drawn, unresolved and dead slots. Black-to-move depths are even, white-to-move
+depths odd. **Two bytes per symmetry class** covers both sides to move.
+
+---
+
+## 4. The algorithm
+
+```
+initialise    per canonical king pair, per square of White's piece
+              mark dead slots; find mates and stalemates;
+              settle every position where Black may take the piece
+
+repeat for d = 0, 2, 4, ...
+  phase A     every black-to-move loss at ply d
+              -> retract a white move -> those white-to-move
+                 positions are wins at ply d+1
+  phase B     every white-to-move win at ply d+1
+              -> retract a black move -> that black-to-move position
+                 is a loss at ply d+2 once *all* of its moves lead to wins
+
+finally       anything still unresolved is a draw
+```
+
+Total work is linear in the number of edges of the game graph, not in
+(depth × positions).
+
+### Why there is no successor counter
+
+The textbook implementation of phase B keeps, per position, a counter of
+successors not yet known to be winning, and decrements it. **That is unsound on
+a symmetry-reduced index.** Let *A* be the number of edges running from orbit
+*R* to orbit *Q*. The group acts transitively on each orbit, so a
+representative of *R* has *A*/|*R*| successors in *Q* while a representative of
+*Q* has *A*/|*Q*| predecessors in *R* — and those agree only when the two
+orbits are the same size.
+
+The case is easy to hit here. Put all three men on the long diagonal (wK a1,
+bK e5, piece c3): the position is fixed by the diagonal reflection, so its orbit
+has 4 members. Move the black king off the diagonal and the successor's orbit
+has 8. A counter seeded with the representative's raw move count would receive
+half the decrements it is waiting for, never reach zero, and the position would
+be silently reported as a draw.
+
+Instead, phase B **re-tests the predecessor by forward move generation**: it is
+lost exactly when every one of its moves now leads to a win. Black has at most
+eight moves, so this is cheap, it is correct for any orbit sizes, and it
+removes the counter array entirely — which is why the table needs only two
+bytes per class rather than three.
+
+### Parallelism and reproducibility
+
+Work is distributed over king-pair blocks with a dynamically scheduled thread
+pool (`std::thread`, no external dependency). The two phases have **disjoint
+read and write sets** — phase A reads the black array and writes the white one,
+phase B the reverse — so the only interference between threads is two of them
+writing the *same* value to the *same* byte. Those writes go through relaxed
+`std::atomic_ref`, and the one place where a duplicate write would corrupt an
+accounting counter uses a compare-exchange to pick a single winner.
+
+Output is **bit-identical across thread counts**, which the test suite checks
+for 1, 2, 3, 5 and 8 threads.
+
+### The three optimisations that matter
+
+Measured on *n* = 32, going from the straightforward version to the current
+one, 9.3 s → 3.4 s:
+
+1. **Saturated-block skipping (phase A, 3.6 s → 0.9 s).** In KQK and KRK every
+   legal white-to-move position is a win — the census reports exactly zero
+   white-to-move draws for every *n* computed — so the count of unresolved white
+   entries in a block falls to zero, after which retracting moves of White's
+   pieces into that block, which is *O(n)* work per position and the single
+   largest cost in the program, can only rediscover what is already known. A
+   per-block counter of open entries skips it. **In KBBK the counters never
+   drain**, because every block also holds the same-coloured-bishop
+   configurations, which are drawn and so never resolve; the optimisation
+   simply stops firing there. Correctness does not depend on it either way: a
+   block that never saturates just costs one more scan.
+2. **Loop interchange (phase B, 3.6 s → 1.4 s).** Sweeping *black king origin*
+   outside and *piece square* inside turns the successor lookups from scattered
+   probes across the whole table into a handful of monotonically advancing
+   streams.
+3. **Dirty-block tracking and *O*(1) attack tests.** Only blocks that received
+   a value at the previous ply are rescanned, which makes the long, sparse tail
+   of deep plies nearly free. With a bounded number of possible blockers, "does
+   the piece attack this square" is arithmetic on the ray parameter, not a ray
+   walk: a man standing on the ray is *strictly between* the ends exactly when
+   its ray parameter is, which is two comparisons per candidate blocker. KBBK
+   has two blockers (the white king and the other bishop) rather than one, and
+   costs one more such test.
+
+---
+
+## 5. Results
+
+Measured on an Apple M2, 8 cores, 16 GB, `clang++ -O3 -march=native`,
+`--threads 8`.
+
+### KQK
+
+| *n* | canonical king pairs | entries / side | table | peak memory | build | verify | deepest win |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 8  | 462 | 29 568 | 58 KiB | 1.7 MB | <0.01 s | full | mate in 10 |
+| 16 | 7 980 | 2 042 880 | 3.90 MiB | 6 MB | 0.07 s | full | mate in 21 |
+| 24 | 40 986 | 23 607 936 | 45 MiB | 51 MB | 0.63 s | full | mate in 33 |
+| 32 | 130 200 | 133 324 800 | 254 MiB | 273 MB | 3.6 s | full | mate in 45 |
+| 40 | 318 630 | 509 808 000 | 972 MiB | 1.03 GB | 11.8 s | 1 % sample | mate in 57 |
+| 48 | 661 572 | 1 524 261 888 | 2.84 GiB | 3.07 GB | 37.5 s | 1 % sample | mate in 69 |
+| 56 | 1 226 610 | 3 846 648 960 | 7.16 GiB | 7.74 GB | 133.6 s | 0.1 % sample | mate in 81 |
+| 60 | 1 616 895 | 5 820 822 000 | 10.84 GiB | 11.70 GB | 163.7 s | 0.025 % sample | mate in 87 |
+
+All runs report **zero mismatches**. Throughput is roughly 60–85 million
+entries per second; the table grows as *n*⁶/4, so each step of 8 in *n* costs
+about 3–4× more. "Peak memory" is `/usr/bin/time -l`'s *peak memory footprint*;
+the *resident* set is much lower on macOS, which compresses the long cold runs
+of identical bytes in the arrays, but the footprint is the number to size for.
+
+**60 × 60 is the largest board that fits comfortably in 16 GB**, and the table
+above is a measured run, not an extrapolation. `n = 62` needs 13.20 GiB and
+`n = 64` needs 15.97 GiB for the value arrays alone, which leaves nothing for
+the operating system. `./egtb sizes` prints the requirement for any *n*.
+
+### KRK
+
+Same index, same memory, same throughput — the rook costs essentially nothing
+extra, and if anything runs marginally faster because half the rays are gone.
+
+| *n* | entries / side | table | peak memory | build | verify | deepest win |
+|---:|---:|---:|---:|---:|---:|---:|
+| 8  | 29 568 | 58 KiB | 1.8 MB | <0.01 s | full | mate in 16 |
+| 16 | 2 042 880 | 3.90 MiB | 6 MB | 0.05 s | full | mate in 35 |
+| 24 | 23 607 936 | 45 MiB | 51 MB | 0.54 s | full | mate in 54 |
+| 32 | 133 324 800 | 254 MiB | 273 MB | 3.1 s | full | mate in 72 |
+| 40 | 509 808 000 | 972 MiB | 1.03 GB | 12.0 s | 1 % sample | mate in 91 |
+| 48 | 1 524 261 888 | 2.84 GiB | 2.86 GB | 40.9 s | 1 % sample | mate in 109 |
+
+For comparison on the same run, KQK took 0.06 s, 0.59 s, 3.2 s, 12.2 s and
+37.4 s at *n* = 16, 24, 32, 40 and 48 — the two are within noise of each other,
+and the KQK figures reproduce the original benchmark run to within 15 %.
+
+**KRK runs out of the one-byte encoding sooner than KQK does.** Depths are
+stored in a byte, with 250 plies the largest representable, and KRK is about
+1.6× deeper than KQK at the same *n*: at *n* = 48 it already needs 217 plies
+where KQK needs 137. Extrapolating the depth law below, the ceiling is reached
+at *n* = 55; *n* = 54, at 245 plies, is the last board that fits. The generator
+detects the overflow and refuses rather than wrapping. KQK stays well inside
+the byte past *n* = 60.
+
+### KBBK
+
+A four-man table, so the same memory reaches a much smaller board. KBBK at
+*n* = 22 needs 6.29 GiB, which KQK does not reach until about *n* = 54.
+Throughput per entry is comparable — the extra cost is all in the size of the
+index, not in the work done per slot.
+
+| *n* | placements / king pair | entries / side | table | peak memory | build | verify | deepest win |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 8  | 2 016 | 931 392 | 1.78 MiB | 3.7 MB | 0.05 s | full | mate in 19 |
+| 12 | 10 296 | 25 482 600 | 48.6 MiB | 53 MB | 1.08 s | full | mate in 29 |
+| 16 | 32 640 | 260 467 200 | 497 MiB | 524 MB | 10.4 s | 1 % sample | mate in 40 |
+| 20 | 79 800 | 1 569 267 000 | 2.92 GiB | 3.14 GB | 76 s | 1 % sample | mate in 52 |
+| 22 | 116 886 | 3 375 083 250 | 6.29 GiB | 5.96 GB | 216 s | 1 % sample | mate in 58 |
+
+Build times are `generate()` alone, matching the KQK and KRK tables above;
+verification is a separate pass and costs roughly half as much again (*n* = 20:
+76 s to build, 118 s to build and sample-verify). All consistent. **22 × 22 is the largest KBBK board that fits in 16 GB**; *n* = 24
+would need 13.6 GiB for the value arrays alone.
+
+An index that split the table by bishop colour would roughly halve this — the
+opposite-colour case, which is the only one that can be won, needs just
+(*n*²/2)² ordered placements rather than *n*²(*n*²−1)/2 unordered ones. It is
+deliberately not done, because "two same-coloured bishops draw" is then assumed
+by the indexing rather than computed by the solver, and computing it is the
+more interesting answer.
+
+### KBNK
+
+The hardest of the elementary mates, and the deepest table here: 33 moves on
+8 × 8 against the queen's 10.
+
+| *n* | placements / king pair | entries / side | table | peak memory | build | verify | deepest win |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 8  | 4 096 | 1 892 352 | 3.61 MiB | 5.8 MB | 0.15 s | full | mate in 33 |
+| 12 | 20 736 | 51 321 600 | 97.9 MiB | 105 MB | 2.6 s | full | mate in 64 |
+| 16 | 65 536 | 522 977 280 | 998 MiB | 1.05 GB | 26.1 s | 1 % sample | mate in 93 |
+| 18 | 104 976 | 1 349 151 552 | 2.51 GiB | 2.70 GB | 74.2 s | 1 % sample | mate in 112 |
+| 19 | 130 321 | 2 093 606 865 | 3.90 GiB | 4.11 GB | 73.5 s | — | mate in 90 |
+| 21 | 194 481 | 4 674 350 835 | 8.71 GiB | 4.77 GB | 253.9 s | 0.1 % sample | mate in 105 |
+
+These are whole-process wall times (`/usr/bin/time`), not `generate()` alone as
+in the tables above; at *n* = 8 that is mostly process start-up. Note that
+*n* = 19 builds *faster* than *n* = 18 despite being half again as large —
+odd boards are far shallower, so there are fewer plies to sweep. *n* = 21 is
+the largest board any endgame here reaches with two unlike pieces; its peak
+memory is below the 8.71 GiB of arrays because macOS compresses the long cold
+runs.
+
+**KBNK is the first endgame here that the byte runs out on before the memory
+does.** A depth-to-mate entry holds at most 250 plies; *n* = 18 already needs
+223 of them, and *n* = 20 needs more than 250, so the generator refuses:
+
+```
+$ ./kbnk gen -n 20
+error: depth to mate exceeds 250 plies on a 20x20 board; widen the entry type
+and rebuild
+```
+
+That is the designed behaviour rather than a wrap-around, and it is why the
+table above stops at 19 — a board that needs only 179 plies, because odd boards
+are much shallower (see below) and 5.86 GiB of arrays would have been
+affordable. Going further means widening the entry to two bytes, which doubles
+every table in the program for the benefit of one endgame; it has not been
+done.
+
+### Cross-checks
+
+Three independent checks, all run by `./tests/run_tests.sh`.
+
+**1. The published 8 × 8 KQK numbers.** `./egtb selftest` compares whole-board
+counts against the standard figures:
+
+| quantity | computed | published |
+|---|---:|---:|
+| canonical king pairs | 462 | 462 (Syzygy `MapKK`) |
+| checkmates | 364 | 364 |
+| stalemates | 872 | 872 |
+| queen *en prise* draws | 22 176 | 22 176 |
+| black-to-move draws | 23 048 | 23 048 |
+| deepest win | mate in 10 | mate in 10 |
+
+**2. An unreduced reference solver.** `src/brute.cpp` solves the same endgame
+with no symmetry at all — one byte per placement per side, one thread, each ply
+a full forward scan — and `./egtb bruteforce -n N` compares the two **position
+by position over every placement on the board**, canonical or not, plus every
+line of the census. For KBBK it indexes the bishops as an *ordered* pair, so
+every position is stored twice, once under each way of naming them; the two
+copies must agree, which is what tests the unordered-pair encoding.
+
+This catches what `verify` structurally cannot. `verify` re-derives each entry
+from its successors, so it would be equally happy with a table that is
+self-consistent but *indexed* wrongly: if canonicalisation collapsed two
+distinct positions onto one slot, solver and verifier would read the same
+corrupted value and agree. The brute force never canonicalises anything, so
+agreement between the two is a direct test of the *D*₄ reduction, of the
+configuration encoding and of the orbit-size weighting in the census. It agrees
+exactly for *n* = 3…8 in all four endgames — 33 030 144 placements at *n* = 8
+for each of KBBK and KBNK, in about 30 s each. **It is what caught the two
+KBNK bugs described in §7**, and so did the verifier, independently.
+
+The 8 × 8 KRK, KBBK and KBNK figures below were *derived* this way rather than
+looked up, and are kept in `selftest` as regression constants:
+
+| quantity | KQK | KRK | KBBK | KBNK |
+|---|---:|---:|---:|---:|
+| checkmates | 364 | 216 | 1 552 | 464 |
+| stalemates | 872 | 68 | 10 204 | 12 888 |
+| piece *en prise* draws | 22 176 | 22 176 | 1 116 752 | 2 330 120 |
+| black-to-move draws | 23 048 | 22 244 | 4 016 252 | 2 472 416 |
+| white-to-move draws | 0 | 0 | 2 578 420 | 53 320 |
+| legal white-to-move positions | 144 508 | 175 168 | 5 082 028 | 10 875 504 |
+| deepest win | mate in 10 | mate in 16 | mate in 19 | mate in 33 |
+
+Mate in 33 is the textbook KBNK figure, and getting anything else is a
+reliable sign that something is broken — which is exactly how the first bug
+announced itself.
+
+The rook has fewer mates and far fewer stalemates than the queen, and more
+legal white-to-move positions — it gives check less often, so fewer placements
+are illegal for want of Black already being in check. The KQK and KRK *en
+prise* counts agree exactly, for the reason given in §2; KBBK's is far larger
+simply because there are two pieces to leave hanging and 2 016 rather than 64
+placements to do it in.
+
+**KBBK is the first of the three with white-to-move draws at all**, and there
+are a great many — half the table. Why is in the next section.
+
+**3. Bellman re-derivation.** Every entry for *n* = 3…24 in KQK and KRK, and
+*n* = 3…14 in KBBK and KBNK, is recomputed from its successors and compared;
+larger boards are checked on a deterministic sample.
+
+### What decides a KBBK position: the bishops' colours
+
+A bishop never leaves the colour it starts on, so the two bishops in a KBBK
+position are either on opposite colours or on the same one, permanently. That
+turns out to settle the game almost by itself.
+
+> **Every legal white-to-move position with both bishops on one colour is
+> drawn** — for every *n* from 3 to 18 computed, without exception. Two
+> same-coloured bishops cannot force mate.
+
+That is the expected result, but it is worth stressing that the program
+*computes* it rather than assuming it: same-coloured configurations are indexed,
+initialised and swept exactly like any other, and they come out drawn. On
+8 × 8 they are 2 577 900 of the 5 082 028 legal white-to-move placements, which
+is the whole of the white-to-move draw count in the table above.
+
+The converse **almost** holds, and the exceptions are the interesting part:
+
+> With bishops on **opposite** colours White wins — except for **520**
+> placements on 8 × 8 (65 up to symmetry), every one of which has a bishop
+> trapped beside a cornered black king.
+
+The smallest is wK c1, bishops e1 and a2, bK a1, White to move:
+
+```
+  3 - . - . -            Black threatens Kxa2, and the a2 bishop is undefended.
+  2 B - . - .            Moving it anywhere along the a2-g8 diagonal keeps a2
+  1 k . K . B            covered, so Black is stalemated; Ba2-b1 is likewise
+    a b c d e            stalemate.  Any other move simply drops the bishop,
+                         and KBK is a draw.  White cannot avoid one or the other.
+```
+
+`./tests/run_tests.sh` checks all of this: the same-colour invariant at every
+*n*, and the trapped-bishop position and both of its stalemating rescues.
+
+The count of these opposite-colour draws grows steadily with the board — 96,
+104, 192, 280, 400, 520, 672, 824, 1008, 1192, 1408, 1624, 1872, 2120, 2400,
+2680 for *n* = 3…18 — so they are not a small-board artefact. They are recorded
+in `selftest` as regression constants.
+
+### What decides a KBNK position: the bishop against the corners
+
+KBNK mates in a corner the bishop can cover. That makes the board's parity
+decide the endgame, in a way that has no analogue on a chessboard, because
+**on an odd board all four corners are the same colour** — (0,0), (*n*−1,0),
+(0,*n*−1) and (*n*−1,*n*−1) all have even coordinate sum when *n* is odd. A
+bishop on the other colour then has no mating corner anywhere.
+
+> On an odd board, with the bishop **off** the corner colour, White wins
+> nothing that was not already **mate in two**. Checked for *n* = 3, 5, 7, 9,
+> 11, 13.
+
+Everything else is drawn: at *n* = 13 that is 328 839 036 of 328 844 528 legal
+white-to-move placements. With the bishop **on** the corner colour the endgame
+behaves normally and is won almost everywhere (99.9% at *n* = 13).
+
+The question is only meaningful for odd *n*. Square colour is a *D*₄ invariant
+exactly when *n* is odd; on an even board mirroring the files flips it, so the
+two colours are exchanged by the symmetry group and cannot possibly differ.
+`selftest` therefore runs this check on odd boards only.
+
+This is also what makes the depth table above zig-zag: **even boards are far
+deeper than the odd boards on either side** — 93 at *n* = 16 against 63 at
+*n* = 15 and 76 at *n* = 17. On an even board two of the four corners are the
+wrong colour, and the expensive part of KBNK is driving the king out of a wrong
+corner and along the edge to a right one. On an odd board, when the bishop is
+the right colour at all, *every* corner is a mating corner and that phase
+simply does not happen.
+
+### Three observations on the maximum depth
+
+**KQK.** The deepest KQK win on an *n* × *n* board is
+
+> **mate in ⌈3(*n*−2)/2⌉**, for every *n* from 9 to 60 that was computed
+> (all of 9–48, plus 56 and 60).
+
+In plies that is 3*n*−7 for even *n* and 3*n*−6 for odd *n* — the depth grows
+at exactly **three plies per unit of board size**, which is what one expects
+from the "shrinking box" technique: confining the king costs a bounded number
+of moves per rank of progress.
+
+**The ordinary chessboard is the one exception.** At *n* = 8 the formula gives
+9, but the true value is 10, attained by a *single* position up to symmetry
+(wK a1, wQ b2, bK f5, White to move — 8 placements on the board, the "mate in
+10" row of `--hist`). Small boards *n* ≤ 8 are all irregular; from *n* = 9 the
+law holds without exception over the computed range. It is verified, not
+proved, above *n* = 60.
+
+**KBBK: no law claimed.** The deepest KBBK win runs 1, 9, 11, 13, 16, 19, 21,
+24, 26, 29, 32, 35, 38, 40, 44, 46, 49, 52, 55, 58 for *n* = 3…22. Growth
+averages about **2.7 moves per unit of board size**, between the queen's 1.5
+and something under 3. The last five boards computed sit exactly on 3*n* − 8,
+and it is tempting to call that a law — but the KRK sequence also looked linear
+until *n* = 17, and only revealed its period-6 structure over a range more than
+twice as long as anything KBBK can reach here. **Twenty points, of which five
+are in the apparent run, is not evidence.** The data are in
+`artifacts/results/kbbk-max-dtm.csv`; no formula is asserted.
+
+Two steps in that run look wrong and are not: *n* = 16 → 17 jumps by 4, and
+*n* = 17 → 18 by only 2, where every neighbouring step is 2 or 3. Boards 15
+through 18 were re-derived entry by entry against their successors, and all
+four stand.
+
+**KBNK grows quadratically — the only one of the four that does.** The deepest
+KBNK win runs
+
+| *n* | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 21 |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| mate in | 7 | 14 | 13 | 22 | 21 | 33 | 29 | 47 | 39 | 64 | 50 | 78 | 63 | 93 | 76 | 112 | 90 | 105 |
+
+which is really two interleaved sequences, for the reason just given: 14, 22,
+33, 47, 64, 78, 93, 112 on even boards and 7, 13, 21, 29, 39, 50, 63, 76, 90,
+105 on odd ones.
+
+The right way to see that this is a different *shape* of growth, and not just a
+steeper line, is to measure each endgame's slope over the first and last third
+of its own computed range. A linear law keeps the same slope:
+
+| endgame | range | early slope | late slope | ratio |
+|---|---|---:|---:|---:|
+| KQK | 8–60 | 1.45 | 1.48 | 1.02 |
+| KRK | 8–50 | 2.36 | 2.36 | 1.00 |
+| KBBK | 8–22 | 2.60 | 2.80 | 1.08 |
+| **KBNK (odd)** | 9–21 | **5.25** | **7.00** | **1.33** |
+
+**And there is a reason it should be quadratic.** A queen, rook or bishop
+repositions anywhere on the board in a single move, so the cost of a
+repositioning does not grow with *n* and the depth stays linear. A knight
+cannot: crossing an *n*-wide board takes Θ(*n*) knight moves, and the mating
+procedure needs Θ(*n*) repositionings — so KBNK should grow like *n*², and it
+does.
+
+Over the odd boards, least squares on all ten computed points gives
+
+> mate in ≈ **0.1411 *n*² + 2.095 *n* − 0.82**, &nbsp; for 3 ≤ *n* ≤ 21
+
+with a **maximum residual of 0.64 moves at every point**, and the mean second
+difference (1.125) agreeing with the fitted 8*a* (1.129) to three decimals.
+
+That fit was tested **out of sample** rather than merely reported: fitting only
+*n* ≤ 19 predicted mate in 106.0 at *n* = 21, and the measured value is **105**
+— an error of one move on a value of a hundred. That *n* = 21 table was then
+re-derived against its successors on a 1-in-1009 sample, 0 mismatches, so the
+point the prediction was tested against is not itself taken on trust. So the quadratic is the right
+envelope. It is still not an exact law: the second differences oscillate
+(2, 0, 2, 1, 2, 0, 1, 1) rather than sitting constant, so there is fine
+structure on top, as there was in KRK. No closed form is claimed.
+
+That steepness, not memory, is what ends the table: at *n* = 18 the deepest win
+is already 223 of the 250 plies a byte can hold.
+
+**KRK is deeper than KQK, and its law has period 6 rather than 2.** No formula of the
+KQK shape fits: the KRK sequence 25, 28, 30, 33, 35, 38, 39, 42, … climbs by 2
+or 3 with an occasional 1, and an exhaustive search over ⌊(*an*+*b*)/*c*⌋,
+⌈(*an*+*b*)/*c*⌉ and round((*an*+*b*)/*c*) for *a* < 60, |*b*| ≤ 60, *c* ≤ 24
+finds nothing that reproduces it — with or without allowing an exception.
+What does hold is a recurrence:
+
+> **mate in *m*(*n*), with *m*(*n*) = *m*(*n*−6) + 14**, for every *n* from 12
+> to 50 that was computed, with the single exception *n* = 24.
+
+Equivalently, writing *n* = 6*q* + *r*,
+
+> ***m*(*n*) = 14*q* + *c*(*r*)**, &nbsp; *c* = (−3, 0, 2, 5, 7, 10) for
+> *r* = 0…5.
+
+So the depth grows by **14 moves per 6 files — 7/3 moves, or 14/3 ≈ 4.67 plies,
+per unit of board size**, against exactly 3 plies for KQK. The rook needs
+roughly 1.56× the depth of the queen on the same board, and the ratio is
+asymptotically 14/9.
+
+The parallel with KQK is close enough to be worth stating plainly. Each endgame
+obeys a clean law from some point on; each has **exactly one exception**, at a
+board size in the middle of the range rather than among the small irregular
+boards; and in each case the exception exceeds the law by one move. For KQK
+that board is *n* = 8, for KRK it is *n* = 24, where the law predicts mate in
+53 and the true value is 54.
+
+Both laws are verified, not proved, and both were checked only over the range
+the machine could reach: *n* ≤ 60 for KQK, *n* ≤ 50 for KRK. The KRK data are
+in `artifacts/results/krk-max-dtm.csv`, the KQK data in `max-dtm.csv`.
+
+### Mating without the table
+
+A depth-to-mate table answers "how long" but not "by what rule". `src/policy.cpp`
+holds a **table-free mating rule for KQK**: a pure function of the position, with
+no lookup, no memory of the game so far, and no dependence on *n*.
+
+Everything it knows is derived from one observation. If the queen shares neither
+file nor rank with the black king, her two lines cut the board into four
+rectangles; the black king sits in one of them — call it the **cage** — and it
+cannot cross either line, because the queen attacks every square of both. So
+**Black can never enlarge the cage.** Only White can, and only by moving the
+queen. Define
+
+```
+Phi = ( |cage| , chebyshev(wK, post) , manhattan(wK, post) )      lexicographic
+```
+
+where the *post* is the square the white king walks to — normally two steps in
+from the board corner the cage contains. Every term is a function of the cage
+and the white king, so no black move changes any of them: a White move that
+lowers Phi has made permanent progress, and a rule that only ever lowers it
+cannot go round in a circle.
+
+Call a White move **sound** when, after it, Black cannot take the queen, Black
+has a legal move, the black king is on neither the queen's file nor her rank, no
+black reply changes the cage, and no black reply reaches a square from which
+Black has no move at all. White plays the first rule that applies:
+
+| | rule |
+|---|---|
+| 1 | **mate**, if a move mates |
+| 2 | **finish**: once the cage is small — width plus height at most 6 — for *k* = 1, 2, … 5 in turn, if White has a forced mate in at most *k* using only sound moves that never grow the cage, play its first move |
+| 3 | **squeeze**: a sound move that strictly shrinks the cage — smallest area first, and at equal area the squarest |
+| 4 | **walk**: a sound move that keeps the cage and brings the king nearer the post |
+| 5 | **wait**: a sound move that keeps the cage, hemming Black in as far as possible |
+| 6 | any legal move that neither hangs the queen nor stalemates |
+
+Rules 3 and 4 lower Phi, which is bounded below. Rule 2 closes the endgame, and
+its **iterative deepening is not decoration** — searching to a fixed depth
+instead lets "mate in at most five" stay true forever while the pieces shuffle;
+taking the smallest *k* that works forces the bound itself down by one every
+move. Rules 5 and 6 carry no such argument, which is why the rule is checked by
+machine rather than by proof. They are also almost never needed: on 8 × 8, over
+all 144 508 positions with White to move, rule 5 fires 96 times and rule 6 464
+times against 132 928 uses of rule 3.
+
+**How it is scored.** `egtb policy` fixes White's move to the rule, leaves Black
+free to play anything, and computes the worst case by backward induction over
+the whole induced graph. A position from which the rule never mates — because
+play cycles, or because it runs out of moves — is counted as a failure. Every
+legal placement is scored; nothing is sampled.
+
+```
+$ ./egtb policy --min 6 --max 14
+  n    positions   optimum  this rule   ratio     stuck    cyclic  verdict
+  6        19360         7         11    1.57         0         0  mates from everywhere
+  7        57760         8         14    1.75         0         0  mates from everywhere
+  8       144508        10         16    1.60         0         0  mates from everywhere
+  9       318752        11         19    1.73         0         0  mates from everywhere
+ 10       639456        12         21    1.75         0         0  mates from everywhere
+ 11      1191120        14         25    1.79         0         0  mates from everywhere
+ 12      2090220        15         26    1.73         0         0  mates from everywhere
+ 13      3492368        17         30    1.76         0         0  mates from everywhere
+ 14      5600192        18         31    1.72         0         0  mates from everywhere
+```
+
+For every board from 4 × 4 to 14 × 14 the rule mates from **every** legal
+position — 13 559 524 of them in all — and never takes more than **1.79 ×** as
+long as the table does. Its own worst case grows like `5n/2` against an optimum
+near `3n/2`, so the price of throwing the table away is a factor tending to 5/3.
+
+**Where the corner is the wrong place to stand.** The rule above, with the
+corner post alone, is total up to 12 × 12 and hangs on 13 × 13 from 53 661
+positions. The cage gets squeezed down to a single file eight squares long —
+an area of 8, so by every measure White is winning — with the black king at the
+far end from the board corner. The white king walks to its post beside that
+corner and is useless there; the queen cannot shorten the strip, because the
+three squares that would stand next to the black king and would simply be taken,
+and anything further leaves him on the wrong side of her rank, which only turns
+the strip upside down. Nothing shrinks and White shuffles for ever.
+
+The cure is to send the king where the work is. When the cage is a strip seven
+or more squares long the post becomes the square one step back from the strip
+and one step along it, beside the square the queen wants to advance to; from
+there she advances under escort. Both posts are functions of the cage alone, so
+Phi remains something Black cannot touch. A strip has to be about eight squares
+long before this bites, and a cage that long and that thin needs a board with
+room for it — which is why every board up to 12 × 12 passes without the fix and
+says nothing at all about the defect.
+
+`--oracle` substitutes the tablebase's own best move for the rule in the same
+harness; it must then reproduce the optimum exactly, ratio 1.00 with no
+failures, which is the control saying the scorer measures the rule and not
+itself. `--line` prints the worst case played out and `--rules` the rule
+histogram. The data are in `artifacts/results/policy.csv`, and
+`doc/endgames.tex` §5 has the same material with diagrams.
+
+---
+
+### KQKR: the one endgame here in which Black is armed
+
+Every endgame above rests on Black having a lone king. `src/kqkr.cpp` breaks
+that deliberately, to see what happens to the depth when the defender has a
+piece of its own. King and queen against king and rook needs three things none
+of the others do:
+
+* **signed entries** — `...RxQ` leaves a bare white king against king and rook,
+  so a white-to-move entry can be a loss as well as a win or a draw;
+* **conversion** — `QxR` leaves KQK and `...RxQ` leaves KRK with the colours
+  swapped, both read forwards out of tables this program already builds;
+* **a four-way induction** — both sides can be the winner, so each ply runs a
+  retraction and a forward re-test for each of them.
+
+No un-capture generator is needed even so: a predecessor of a four-man position
+under a capture would have five men, so captures only ever leave the table
+forwards. One fact keeps the bookkeeping small — **no capture is ever bad for
+the side making it**, since taking the rook leaves KQK (a white win or a draw,
+never a loss) and taking the queen leaves king and rook against a bare king
+(a black win or a draw, never a loss).
+
+```
+$ ./egtb kqkr -n 8
+  n   entries/side   white wins        draws  white loses    deepest  seconds
+  8        1892352      1108111         8963         2142     69 ply     0.64
+      deepest white win: wK a1, wQ h1, bK c2, bR c4 -- mate in 35
+```
+
+**Mate in 35 on 8 × 8** is the published figure, and nothing here was fitted to
+it — it is the first external check this endgame passes.
+
+#### The depth runs away, and then the endgame stops being won
+
+| *n* | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| deepest win (moves) | 35 | 44 | 54 | 69 | 85 | 108 | 132 | **218** | 166 | 116 |
+| drawn positions | 0.80% | 0.57% | 0.42% | 0.32% | 0.24% | 0.19% | 0.15% | 0.13% | **26.6%** | 26.7% |
+
+Up to *n* = 14 this is the steepest growth in the repository, and it never
+settles. Comparing boards two apart, so the odd/even wobble cancels, the local
+exponent for which depth ∝ *n*^α runs
+
+| boards | 6→8 | 8→10 | 10→12 | 12→14 | 13→15 |
+|---|---|---|---|---|---|
+| α | 1.46 | 1.94 | 2.49 | 2.86 | 4.91 |
+
+It climbs through 2 and keeps climbing. A cubic fitted to *n* ≤ 14 has residuals
+under one move and predicts 162 at *n* = 15 —
+`d(n) ≈ n³/18 − n²/7 − 169n/126 + 559/21` — but that is an interpolant, not a
+law: over so short a range the *n*³ coefficient is not identifiable, and sliding
+the fitting window by one board moves it from +0.08 to −0.02 with no loss of
+fit. **The exponent does not converge to 3; it passes through it.**
+
+What it was on its way to is not a cubic. At *n* = 15 the depth reaches **218**,
+fifty-six moves above that extrapolation, and at *n* = 16
+the drawn fraction jumps from one in eight hundred to more than one in four,
+while the deepest win *falls* to 166 and then to 116. What has happened is that
+a whole class of positions — 65 million of the 241 million wins at *n* = 15 —
+stops being winnable at all.
+
+The depth histogram shows the class directly. It is bimodal at every board size:
+a shallow mode that grows slowly (21, 23, 25, 27, 31, 33 plies at *n* = 10…15)
+and a deep one that runs away (85, 111, 141, 183, 227, **395**). At *n* = 16 the
+deep mode is simply gone, and the drawn count is what it used to weigh.
+
+#### One position, watched across nine board sizes
+
+The clearest evidence is a single placement, taken from the drawn list at
+*n* = 16 and probed on every board that contains it. All four men sit in the
+corner; Black's rook stands on the queen's rank, between her and the black king.
+
+```
+$ ./egtb kqkr -n 12 --probe a1,g1,c1,d1
+      probe wK a1 wQ g1 bK c1 bR d1:  white to move: White mates in 61 moves
+```
+
+| *n* | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 |
+|---|---|---|---|---|---|---|---|---|---|
+| wK a1, wQ g1, bK c1, bR d1 | 26 | 30 | 37 | 51 | 61 | 77 | 95 | **176** | **draw** |
+
+The position never changes; only the empty space behind it does. The rook
+interposes on the queen's line, and the extra room is room to keep interposing.
+This is the shape of a phase transition — the depth diverging as a parameter
+approaches a critical value, and past it the win gone.
+
+#### What the new draws look like: nothing in the air
+
+A position can be drawn *tactically* — Black is checking, or hitting the queen,
+or a king is in contact — or *structurally*, with nothing attacked at all and
+White simply unable to make progress. The second is what "fortress" means, and
+the two can be told apart mechanically. Call a placement **quiet** when nothing
+whatever is attacked: no check either way, the queen not bearing on the rook,
+the rook not bearing on the queen, and no king beside an enemy man.
+
+| drawn symmetry classes | 8 × 8 | 15 × 15 | 16 × 16 |
+|---|---:|---:|---:|
+| **White** to move | 8 963 | 304 483 | 110 091 285 |
+| — of them **quiet** | **0** | **0** | **76 718 643** (69.7%) |
+| Black to move | 78 518 | 4 573 792 | 338 880 229 |
+| — of them quiet | 35 284 (44.9%) | 3 145 919 (68.8%) | 276 036 657 (81.5%) |
+
+Quiet draws with *Black* to move exist at every board size — 35 284 even on
+8 × 8 — so the test is not vacuous. But with **White** to move, up to and
+including 15 × 15, there is **not one** placement in which nothing is attacked
+and the position is still drawn. Every draw Black holds there against a free
+tempo he holds by something immediate: 287 230 of the 304 483, or 94%, have the
+rook *checking*. At 16 × 16 seven of every ten do not — 76.7 million placements
+where White has the move, nothing whatever is attacked, and he still cannot
+win. That is the transition seen from a
+second side, and it says what kind of thing appeared: not tactical escapes but
+fortresses, which did not exist one board size earlier. Black can hold quiet
+positions at 15 × 15 too — 3 145 919 of them — but only *with the move*, one
+tempo from the harassment that does the work. One placement makes the whole
+contrast concrete: at 15 × 15, wK a1, wQ o2, bK c1, bR i15 — nothing attacked
+anywhere — is a draw with Black to move and **mate in 21** with White to move.
+At 16 × 16, wK a1, wQ h16, bK g2, bR j8 and wK a1, wQ b1, bK d2, bR c3 are drawn
+whichever side is to move, and a tempo is worth nothing to White in either.
+`doc/endgames.pdf` §6.4 has all three as diagrams.
+
+**What is checked, and what is not.** The generator is cross-checked four ways:
+against an unreduced brute force using a different algorithm (*n* ≤ 6, every
+placement), against a full Bellman re-derivation (*n* ≤ 16, every entry),
+against a naive move generator and an orbit-by-orbit index test (*n* ≤ 16,
+`--selfcheck`), and against the published 8 × 8 value. What is *not* established
+is where exactly the transition sits or whether it is sharp: it is bracketed
+between 15 and 16 on this material and nothing more. The class that appears is
+shown to be a fortress class in the sense above, but it is not characterised
+geometrically — no rule is given for which placements are in it. Data in
+`artifacts/results/kqkr-max-dtm.csv` and `kqkr-fortress.csv`.
+
+### KQKK: two black kings, and a mate that must catch both
+
+`src/kqkk.cpp` is the other endgame here in which Black is not bare, and it
+departs in the opposite direction from KQKR: Black's second man is another
+**king**.
+
+* The two black kings may stand **beside each other** — they are the same
+  colour, so neither attacks the other, and each blocks the queen's rays for
+  the other.
+* Neither may stand on or beside the **white** king. That is the ordinary rule
+  that kings do not touch, applied to each of them in turn, and it has a
+  consequence worth stating: in a legal position the white king attacks
+  nothing, so check always means *the queen* bears on the square, and mate
+  always means she bears on both kings at once along two different rays.
+* White can never capture, kings not being takeable. That is the point of the
+  variant — if White could take one king the other would be an ordinary bare
+  king and this would be KQK.
+* Black can take the queen when she stands beside a black king undefended,
+  which leaves a white king against two black kings. Neither side can then even
+  give check, so it is a draw, settled before the search starts.
+
+**A mate counts only when both kings are mated at once.** That sentence is the
+endgame, and it has two readings, which the program computes as two rule sets
+selected by `--loose`.  A third, `--capture`, drops the notion of mate
+altogether and plays for the kings themselves; it is the most interesting of
+the three and it has its own section below.
+
+* **strict** (the default). After Black's move neither king may be left
+  attacked — the ordinary rule of chess, applied to each king in turn. Black is
+  checkmated when both kings are attacked and no move of either escapes; when
+  Black has no move but only *one* king is attacked, that is stalemate and a
+  draw. So a position in which one black king is trapped while the other is not
+  in check is not a win: what the ordinary rule calls mate, this one calls a
+  draw.
+* **loose** (`--loose`). A black king may stand in check; what Black may not do
+  is leave *both* kings attacked at once.
+
+They differ in one predicate — `restOk` in `kqkk.cpp` — and they could hardly
+describe less similar games.  Under the first White wins everything; under the
+second he wins one position in ten thousand.  Under the third, where a king is
+taken rather than mated, he wins about two thirds and Black holds the rest.
+
+#### Strict: White wins everything, and faster than against one king
+
+| *n* | entries / side | white-to-move wins | white-to-move **draws** | deepest win |
+|---:|---:|---:|---:|---:|
+| 4  | 1 488       | 1 184         | 0 | mate in 4 |
+| 6  | 66 420      | 142 312       | 0 | mate in 5 |
+| 8  | 806 400     | 2 534 392     | 0 | mate in 7 |
+| 10 | 5 268 600   | 20 390 496    | 0 | mate in 8 |
+| 12 | 23 831 280  | 105 199 184   | 0 | mate in 9 |
+| 14 | 84 366 828  | 407 855 064   | 0 | mate in 11 |
+| 16 | 250 575 360 | 1 294 820 392 | 0 | mate in 12 |
+| 17 | 410 382 023 | 2 177 311 696 | 0 | mate in 13 |
+
+**Every legal white-to-move position is a win**, on every board from 3 × 3 to
+17 × 17 — the white-to-move draw count is exactly zero at each of them — and the
+deepest 8 × 8 win is **mate in 7**, against mate in 10 for the same queen
+against a single king.
+
+The second black king is not a defence. It is a liability, and the strict rule
+is why: Black must keep *both* kings out of check with *one* move. A check that
+a lone king would answer by stepping aside must now be answered while the other
+king also stays safe, and a queen attacking both kings at once cannot be
+answered at all, since one move cannot move two kings. The mating pattern is
+therefore not a corner but a **fork**, and that shows in where the mates are.
+Of the 307 604 mating placements on 8 × 8:
+
+```
+$ ./egtb kqkk -n 8 --mates 1
+      307604 mating placements: kings side by side 0.7%, both on the rim 20.3%,
+      neither on the rim 26.9%, one in a corner 14.5%
+      the white king's part: defends the queen 14.0%, stands beside a flight square 37.3%,
+      neither -- the queen mates both kings alone -- 56.8%
+      mate with the queen alone, both kings off the rim: wK=a1 wQ=d4 bK=d2 bK=f2
+        8 . - . - . - . -
+        7 - . - . - . - .
+        6 . - . - . - . -
+        5 - . - . - . - .
+        4 . - . Q . - . -
+        3 - . - . - . - .
+        2 . - . k . k . -
+        1 K . - . - . - .
+          a b c d e f g h
+```
+
+A queen and king mate a lone king only on the rim. Here **26.9% of the mates
+have neither king on the rim, and in 56.8% the white king contributes
+nothing** — he neither defends the queen nor stands beside a square a black king
+could otherwise run to. The queen mates both kings by herself from d4: she
+attacks d2 down the file and f2 down the diagonal, and neither king can answer
+both checks with one move. Stepping one king off its ray leaves the other one
+attacked, and the two squares that would block instead — d3 on the file, e3 on
+the diagonal — are attacked by the queen herself. On 12 × 12 the effect is
+stronger: 47.1% of mates have neither king on the rim and the white king is
+idle in 78.8% of them, a larger board giving the queen more room to fork from.
+
+#### What the rule costs, and who pays
+
+The "both at once" rule creates a class of positions that the ordinary rule
+would call wins: Black has no legal move and exactly one king is in check.
+
+```
+$ ./egtb kqkk -n 8 --single 1
+      no legal move, one king in check and the other not: mate by the ordinary
+      rule, a draw by this one -- wK=a1 wQ=b1 bK=c1 bK=d1, black to move
+        1 K Q k k - . - .
+          a b c d e f g h
+```
+
+There are 93 508 of them on 8 × 8 out of 94 624 black-to-move stalemates in
+all, so **almost every stalemate in this endgame is a mate the rule declines to
+count**; only 1 116 are stalemates in the ordinary sense, with neither king in
+check. At 16 × 16 the proportion is 10 155 220 of 10 159 280, or 99.96%.
+
+The rule costs White nothing all the same, because White is never obliged to
+walk into one, and the census says so exactly. Every black-to-move draw on
+8 × 8 is either a stalemate (94 624) or a position in which Black simply takes
+the queen (1 146 804), and those two add to 1 241 428, which is the whole
+black-to-move draw count. **There is no third kind — no fortress and no
+positional draw anywhere in the table** — and that identity holds at every board
+size computed. It is the same fact as the white-to-move draw count being zero,
+seen from Black's side.
+
+#### Loose: the same men, and almost no wins
+
+Read the rule the other way — a black king may stand in check, and only both at
+once is forbidden — and the endgame collapses:
+
+```
+$ ./egtb kqkk -n 8 --loose
+  n   entries/side     white wins          draws    deepest  seconds  checks
+  8         806400            544        5481076      3 ply     0.02
+      deepest white win: wK=d2 wQ=a3 bK=a1 bK=b1 -- mate in 2
+```
+
+**544 won placements out of 5 481 620**, one in ten thousand, and never deeper
+than mate in 2 — so every one of them is within two moves of one of the corner
+mates shown below, and White never creates a win, only finishes one that the
+placement already contains. The reason is immediate: from
+a fork Black no longer has to save both kings, only to avoid leaving both
+attacked, so moving either king to any safe square answers it. The fork stops
+being a threat, and White has nothing else. Under this reading the double mate
+above is not even a win:
+
+```
+$ ./egtb kqkk -n 8         --probe c3,c2,a2,b1     # black to move: black is mated
+$ ./egtb kqkk -n 8 --loose --probe c3,c2,a2,b1     # black to move: draw
+```
+
+because ...Ka2-a3 now leaves only the b1 king attacked, which is allowed.
+
+The won placements are not merely few, they stop growing: there are exactly
+**80 n − 96** of them at every board size from *n* = 5 to *n* = 14 — 304, 384,
+464, …, 1 024 — while the number of legal placements grows like *n*⁸, so the
+winning fraction falls away like *n*⁻⁷. The mates behind them are a single
+family. On 8 × 8 there are **32 mating placements in the whole board**, against
+307 604 under the strict rule; all 32 have both kings on the rim, 87.5% have
+them side by side, 75% have one of them in a corner, and in every one of them
+the white king is standing beside a square a black king would otherwise use.
+The queen never mates alone here, and never away from the edge:
+
+```
+$ ./egtb kqkk -n 8 --loose --mates 1
+      32 mating placements: kings side by side 87.5%, both on the rim 100.0%,
+      neither on the rim 0.0%, one in a corner 75.0%
+      the white king's part: defends the queen 87.5%, stands beside a flight square 100.0%,
+      neither -- the queen mates both kings alone -- 0.0%
+      mate: wK=c1 wQ=b2 bK=a1 bK=a2
+        2 k Q . - . - . -
+        1 k . K . - . - .
+          a b c d e f g h
+```
+
+Both rule sets are cross-checked identically, so the contrast is not an
+artefact of one of them being the tested one: a Bellman re-derivation of every
+entry, and a position-by-position comparison against an unreduced solver using
+a different algorithm, at *n* = 4, 5 and 6 for both.
+
+**What is checked, and what is not.** Every entry is re-derived from its
+successors by an independent forward move generator for *n* ≤ 17; every one of
+the *n*⁸ ordered placements is compared against an unreduced solver that uses no
+symmetry and a different algorithm for *n* ≤ 6; and the move generator is
+compared against a naive ray-walking one, and every table value against the
+definition of its symmetry class — which here includes swapping the two black
+kings — on random placements for *n* ≤ 12. Both rule sets pass all three. What
+is *not* established is that White wins everything on boards larger than
+17 × 17: the white-to-move draw count is zero at every size computed, and there
+is no argument here that it must stay zero.
+
+#### Cost
+
+Entries are one byte and the block key is a king triple, so a table is about
+*n*⁸/16 entries per side.
+
+```
+$ ./egtb kqkk --min 8 --max 24 --sizes
+  n   king triples   queen sq     entries/side     both sides
+  8          12600         64           806400       1.54 MiB
+ 16         978810        256        250575360     477.93 MiB
+ 20        3825441        400       1530176400       2.85 GiB
+ 24       11576268        576       6667930368      12.42 GiB
+```
+
+*n* = 24 is the largest board that fits in 16 GB, which puts this endgame
+between KBBK and KBNK. On eight cores, building 16 × 16 takes 26 s and
+re-deriving every one of its 501 million entries another 15 s; 8 × 8 builds in
+0.07 s. Run-length encoding, which pays on every other
+table here, does *not* pay on this one — a KQKK block is one king triple swept
+over every queen square, almost all of it won, with the depth changing from one
+square to the next, so the runs are short. The writer encodes, compares and
+keeps whichever is smaller; `xz` on the raw file still reaches about 20×.
+
+#### Capture rules: taking the kings rather than mating them
+
+A fork under the strict rule is an instant win, which is not what the ordinary
+game feels like: in chess the objective is to *capture* the king, and mate is
+the name for a capture that cannot be prevented. `--capture` takes that
+literally, and it changes the endgame more than any other switch in this
+program.
+
+> **Every king is an ordinary man, and a player wins by capturing all of the
+> opponent's.**
+
+The rules in full, for any number of kings a side. Everything not listed is
+chess:
+
+1. Every man moves and captures exactly as in chess, kings included: one square
+   in any direction, taking whatever stands on it.
+2. **A king is an ordinary piece in respect of check.** It may move to an
+   attacked square, it may be left standing on one, and it may be captured like
+   any other man — by anything, another king included. There is no check, no
+   checkmate and no pin: *every* move that obeys rule 1 may be played, and a
+   player who needs to walk a king into an attacked square is free to.
+3. A player wins the instant the opponent's **last** king is taken. The game
+   ends with that capture and nothing that would have followed it matters — in
+   particular the last king may be taken by a move that leaves the capturer's
+   own king hanging. Losing a king while others remain costs a piece and nothing
+   more.
+4. A player who still has a king and no legal move is stalemated, and the game
+   is drawn. Under rule 2 that takes *total immobility*, which the theorem below
+   characterises; for this material it cannot happen at all.
+5. Promotion and en passant are as in chess, promotion being to queen, rook,
+   bishop or knight. Castling plays no part.
+
+The two black kings stand on exactly the same footing as each other and as the
+white one. Nothing is protected and nothing is privileged: the only asymmetry
+is material, Black having two kings to lose and White one, so White must take
+both of his and Black need only take the one. Two probes show the whole rule:
+
+```
+$ ./egtb kqkk --capture -n 8 --probe a1,h8,b1,d5     # a black king next to the white king
+        white to move: White wins in 17 plies (9 moves)      Ka1xb1 -- he takes it
+        black to move: BLACK wins in 1 plies (1 moves)       ...Kb1xa1 -- and it is over
+$ ./egtb kqkk --capture -n 8 --probe a1,d3,d1,d5     # the queen attacking BOTH black kings
+        white to move: White wins in 15 plies (8 moves)
+$ ./egtb kqkk -n 8 --probe a1,d3,d1,d5               # the same placement, mating rules
+        white to move: illegal
+```
+
+The first is a placement no ordinary rule set admits — a king beside a king,
+legal for either side, and whoever moves takes. The second is a black king
+standing where the queen bears on it, which the mating rules call illegal and
+these call a Tuesday.
+
+#### One king a side: chess, up to stalemate
+
+Rule 2 sounds like the large change and rule 3 like the small one. With one king
+a side it is the other way round. Call a position **sound** if the side *not* to
+move does not have its king attacked — the condition every position reachable in
+chess satisfies, and the one every table here uses to decide which slots are
+legal.
+
+> **Theorem.** Let *P* be a sound position with one king a side. Then the value
+> of *P* under the rules above equals its value under **chess\***, which is
+> ordinary chess with exactly one clause replaced: *when the side to move has no
+> legal chess move, the game is drawn if that side has no move under rule 2
+> either, and otherwise that side loses.*
+
+So the two games agree except where the side to move has no chess move, and
+there they differ in two ways and only two: **stalemate becomes a loss** — the
+familiar case, and the one that matters in practice — and **a checkmate becomes
+a draw**, when the mated side has no move under rule 2 at all. Ordinary
+checkmate is otherwise still a loss, and ordinary stalemate with the mover
+totally immobile is still a draw.
+
+*Proof.* Three steps. (i) In a sound position the mover does not have the
+opponent's king attacked, so by rule 1 no capture of a king is available to it:
+a king can be taken only in reply to a move that left the moving side's own king
+attacked. Call those moves *self-exposing*; the rest are exactly the legal moves
+of chess, and they lead to sound positions again. (ii) A self-exposing move
+loses at once — some enemy man can move onto the square, rule 2 makes that move
+legal (no check to respect, no pin to prevent it) and rule 3 ends the game
+there. So no self-exposing move is ever better than a chess move. (iii) Hence:
+if the mover has a chess move, deleting the self-exposing ones changes nothing
+and what is left is the chess move list; if it has no chess move but some move,
+every move loses by (ii); if it has no move at all, rule 4 draws. Backward
+induction over the sound positions — a finite graph, once a repetition rule is
+fixed and the same one given to both games — gives the claim. ∎
+
+One corollary is what makes the two games feel alike: **optimal play under
+capture rules never gives a king away from a position that is not already
+lost.** Kings do walk into attacked squares all over this program's output, but
+only where the alternative is no better.
+
+**Which stalemates survive.** The side to move is stalemated exactly when *no
+man of that side has any move at all*, which happens exactly when (i) every
+non-pawn man of that side, its king included, has every square it could move to
+off the board or occupied by a man of *its own* colour — an enemy man there
+would be capturable, hence not a blocker — and (ii) every pawn of that side has
+the square in front of it occupied, by a man of either colour, and no enemy man
+on either capture square.
+
+Two consequences. The immobile side needs **at least four men**, since by (i)
+every square beside its king holds one of its own and a king has at least three
+such squares. And **if the immobile king is attacked at all, it is attacked by a
+knight**: every square beside it is occupied by its own men, so a rook, bishop
+or queen would have to bear through an occupied square, and a checking pawn or
+king would have to stand on one. So the survivors come in two families:
+
+- **(S)** the immobile king is unattacked — ordinary stalemate, drawn under both
+  rule sets;
+- **(M)** the immobile king is attacked, necessarily by a knight — ordinary
+  **checkmate** and a loss, but stalemate and a draw here. This is the only case
+  in which capture rules are kinder to the defender than the ordinary ones.
+
+Both are inhabited. Delete the knight from (M) and it becomes an (S):
+
+```
+    8  . . . . . . . K       White: Kh8, Rd1, Nc2
+    7  . . . . . . . .       Black: Ka1, Rb1, Bc1, Pa2, Pb2, Pd2
+    6  . . . . . . . .
+    5  . . . . . . . .       Black to move, and has no move at all.
+    4  . . . . . . . .       Nc2 checks a1, so ordinary chess calls this
+    3  . . . . . . . .       checkmate; rule 4 calls it a draw.
+    2  p p N p . . . .
+    1  k r b R . . . .
+       a b c d e f g h
+```
+
+Black is immobile man by man: the king on a1 is shut in by its own rook and
+pawns on b1, a2 and b2; the rook on b1 has a1, b2 and c1 all occupied by its own
+side; the bishop on c1 stands on the rim, so its only squares are b2 and d2,
+both its own; the pawns on a2 and b2 are blocked by the men on a1 and b1 and
+have nothing but their own men to capture; and the pawn on d2 is blocked from the
+front by the white rook, which a pawn cannot take, with its own bishop on c1 and
+an empty e1 to the sides. Nor is that rook hanging: the b1 rook's rank is
+blocked at c1, the c1 bishop's diagonals are b2 and d2, and no black pawn stands
+on c2 or e2 to take it.
+
+**None of this can happen to the material here.** Immobility needs four men on
+the immobile side; every side of every table in this program has two, king and
+queen or king and king. So rule 4 never fires, and these tables see only the
+first half of the theorem — the half that turns the stalemate draws of ordinary
+chess into wins. That is exactly why **K + Q vs K** is won here in 17 plies
+against 19 in the ordinary game: the extra move there is the one White spends
+avoiding a stalemate that these rules would reward.
+
+**The theorem, checked.** Its first half is machine-checked against the ordinary
+KQK table, which this program builds with a different solver:
+`./egtb kqkk --capture --theorem` walks every K + Q vs K placement for
+3 ≤ *n* ≤ 9 and asserts that every chess win stays a win, every chess loss stays
+a loss, and every chess **checkmate and every chess stalemate** has capture
+value exactly −2 — the mover has to give the king away, and it falls on the ply
+after next.
+
+```
+$ ./egtb kqkk --capture --theorem -n 8
+  n chess positions   wins agree losses agree  mates -> -2 stale -> -2  verdict
+  8         368452       144508       200896          364        872  theorem holds
+      chess draws: 22176 still drawn, 0 now lost by the mover, 0 now won by it
+```
+
+Those three counts are the ordinary KQK census figures exactly — 364 checkmates,
+872 stalemates, 22 176 draws in which Black simply takes the queen — so the
+enumeration, the KQK solver and the capture solver agree three ways. And the
+last line says the drift does not propagate on this material: a chess draw
+*could* in principle become a win, for a side that can now force a stalemate,
+or a loss, for a side whose only defence was one. Here not one of the 22 176
+moves, because every one of them is a position where the queen falls rather than
+one held by a stalemate resource.
+
+#### What the rules change about this endgame
+
+Four things follow, and none of them is an extra clause:
+
+* **A fork wins a king, not the game.** White must take one and then hunt the
+  other, so the endgame acquires a second phase.
+* **The two black kings defend each other.** Q×K is answered by K×Q, so a
+  capture is only safe when the white king covers the square, or when the kings
+  have drifted apart.
+* **White can lose.** A black king standing beside the white king takes it, and
+  that ends the game whatever else is on the board.
+* **The queen is not expendable.** …K×Q leaves a white king against two black
+  kings — and on every board this program builds a four-man table for, that is a
+  black *win*, not the draw it is under the mating rules. (Past 14 × 14 it would
+  be a draw; see the transition below.)
+
+#### K vs K + K, and why only one rule set needs a table for it
+
+The material the conversion lands in is worth a word of its own, because it is
+the one place the three rule sets differ in whether there is anything to
+compute at all.
+
+* **Capture rules.** A real table, solved for both sides to move, verified by
+  Bellman re-derivation and against the unreduced solver, and stored inside the
+  `.cap` files. Three squares to `--probe` address it.
+* **Strict and loose mating rules.** No table, and none needed: it is drawn
+  everywhere by construction. Only the queen can attack, and there is no queen,
+  so no black king is ever attacked and "both at once" never happens; and a
+  black king may never stand beside the white king, so White is never in check
+  either. Nobody can be mated, so every legal position is a draw. It is the
+  same observation as KNNK being wholly drawn — a theorem rather than a
+  computation.
+
+#### Two kings hunt down a lone king
+
+The fourth point is the load-bearing one, and it is a computed result rather
+than an assumption. The table converts into three sub-endgames, all built here
+under the same rules, and the census reports them:
+
+```
+$ ./egtb kqkk --capture -n 8 --stats
+K vs K       3612 of 4032 placements drawn  (the rest: the kings already touch)
+K vs K + K   black to move: 124992 of 124992 are black wins -- every one, deepest 33 plies
+K + Q vs K   white to move: 249984 of 249984 are white wins -- every one, deepest 17 plies
+```
+
+**Two black kings win against a lone white king from every position on the
+board — and then, at 15 × 15, they stop.** They keep side by side so that
+neither can be taken safely — the white king that captures one is captured by
+the other — and in that formation they push a lone king to the edge and take
+it, in at most 17 moves on 8 × 8. A single king cannot do it, and neither can
+two that let themselves be separated; the phalanx is the whole method. That is
+why …K×Q is fatal on the boards this program's four-man tables cover, and why
+the endgame below is really about whether White can keep his queen.
+
+But the phalanx only works while the board is small enough to trap a king
+against, and the size at which that fails is sharp:
+
+| *n* | 8 | 10 | 12 | 13 | **14** | **15** | 16 | 18 | 20 | 22 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Black wins, black to move | 100% | 100% | 100% | 100% | **100%** | **7.0%** | 6.0% | 4.7% | 3.8% | 3.1% |
+| deepest win (moves) | 17 | 28 | 41 | 50 | **62** | **37** | 37 | 37 | 37 | 37 |
+
+Up to 14 × 14 the two kings win from **every** placement, and the depth climbs
+faster than linearly the whole way — 17, 28, 41, 50, 62 moves. At 15 × 15 it
+collapses. Only 7% of placements are still won, and the deepest of them is 37
+moves, a number that does not then move again: it is **exactly 73 plies at every
+board size from 15 to 22**. Their count grows like *n*⁴ against *n*⁶
+placements, so the share decays like *n*⁻² — 7.0%, 6.0%, 5.3%, 4.7%, 4.2%,
+3.8%, 3.4%, 3.1%.
+
+What survives is *not* a cornered white king, which is the first guess and is
+wrong: at *n* = 16 his distance to the nearest edge is distributed almost
+identically in the two sets — 19.9/22.3/17.8/40.0% at distance 0/1/2/≥3 among
+the wins against 23.7/20.2/17.1/39.0% among the draws. Nor is it a phalanx
+already formed: the black kings stand adjacent in 2.5% of the wins and 2.9% of
+the draws. What separates them is plain proximity — whether the pair is already
+close enough to finish inside that 73-ply horizon. The further black king stands
+within four squares of the white one in 24% of the won placements and 5% of the
+drawn ones.
+
+So the superlinear growth up to *n* = 14 was not a growth law but the approach
+to a transition, which is the same shape §6 finds in KQKR: a depth that runs
+away with the board and then a win that disappears. It is sharper here — KQKR's
+drawn fraction went from 0.13% to 26.6%, this one goes from 0 to 93% in a single
+board size.
+
+**What exactly is lost.** Take one placement across the boundary: white kings
+a1 and b1 against a black king on d4, the same three squares on every board.
+It is a win in 17 plies at 6 × 6, 31 at 8 × 8, 109 at 14 × 14 — and **drawn**
+from 15 × 15 on. Replay the 55-move 14 × 14 win position by position and ask
+the 15 × 15 table what each is worth: **the first 81 of its 109 plies are
+drawn** on the larger board. The line only becomes a win there at ply 82, by
+which point Black is already pinned in the corner and 28 plies from the end.
+The endgame has two phases and only one of them depends on the board — the
+finish is a local trap that works at any size, and the approach is a drive
+across open ground that needs a small board.
+
+The obvious explanation is wrong. At the moment in the 14 × 14 win where Black
+is pinned on the top rank — white kings i11 and j11, black king j14 — he has
+five legal squares and every one loses. On 15 × 15 those *same five squares are
+all drawn*, and of the three the extra rank adds, stepping up to j15 loses.
+Black is not saved by the new ground; he is saved because the old ground stopped
+being a wall.
+
+**The hunt has a reach, and it is six.** Counting white-to-move placements by
+the black king's distance to the nearer white king:
+
+| separation | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | ≥9 |
+|---|---|---|---|---|---|---|---|---|---|
+| 14 × 14, won | 267 852 | 449 696 | 541 092 | 552 000 | 502 780 | 420 192 | 333 396 | 253 872 | *all* |
+| 15 × 15, won | 356 888 | 16 000 | 11 192 | 5 820 | 2 328 | 520 | **0** | **0** | **0** |
+| 16 × 16, won | 466 380 | 15 300 | 10 848 | 5 776 | 2 328 | 520 | **0** | **0** | **0** |
+| 17 × 17, won | 599 232 | 14 796 | 10 576 | 5 728 | 2 328 | 520 | **0** | **0** | **0** |
+
+At 14 × 14 the reach is the whole board — every separation out to 13 is won and
+nothing is drawn. At 15 × 15 it collapses to six, and no won placement has the
+kings seven or more apart, on 15, 16 or 17. What survives is a *fixed* set, not
+a shrinking share of a growing one: 2 328 placements at separation 5 and 520 at
+separation 6, the same numbers to the unit on all three boards. Six is necessary
+and not sufficient — a1/b1 vs d4 has separation 3 and is drawn — but past six
+the question is closed.
+
+**Why 14 → 15 and not 13 → 14.** None of the above says why *that* board. The
+wall argument fails as an explanation: rank 14 is the edge on a 14-board and an
+ordinary square on a 15-board, but rank 13 is the edge on a 13-board and an
+ordinary square on a 14-board, and nothing breaks there. Nor is it the runaway
+depth. The way to see it is to stop using square boards —
+`tests/rect_kk.cpp` solves K + K vs K on rectangles, sharing no code with
+`src/kings.cpp`, and reproduces its census, depth and deepest placement on every
+square board from 5 × 5 to 14 × 14 first:
+
+| board | squares | shorter side | ⌊(s−1)/2⌋ | won | deepest |
+|---|---|---|---|---|---|
+| 13 × 13 | 169 | 13 | 6 | **100%** | 99 |
+| 14 × 14 | 196 | 14 | 6 | **100%** | 123 |
+| 15 × 14 | 210 | 14 | 6 | **100%** | 141 |
+| 18 × 14 | 252 | 14 | 6 | **100%** | 197 |
+| 24 × 14 | 336 | 14 | 6 | **100%** | **299** |
+| 20 × 13 | 260 | 13 | 6 | **100%** | 183 |
+| 15 × 15 | 225 | 15 | **7** | 6.99% | 73 |
+| 20 × 15 | 300 | 15 | **7** | 5.10% | 73 |
+
+**Area is irrelevant and the shorter side is everything.** A 24 × 14 board has
+336 squares — half as many again as 15 × 15 — and every placement on it is won,
+in up to 299 plies. Every board tested with a shorter side ≤ 14 is won
+everywhere; every board with a shorter side of 15 collapses to the same frozen
+73, and at 20 × 15 to the same deepest position (Kf6 Kg6 vs kb1) as 15 × 15.
+
+Read as a distance it answers the question: on a board whose shorter side is
+*s*, the furthest the black king can get from the nearest edge is ⌊(s−1)/2⌋ —
+**6** for *s* = 13 *and* for *s* = 14, so the step from 13 to 14 buys Black no
+new distance from the edge and costs White nothing, and **7** at *s* = 15. Two
+kings can work on a king at most six from an edge; give him a square seven from
+every edge and they cannot make him leave it.
+
+This also kills an argument used elsewhere in this file: that steeply climbing
+depth signals a transition ahead. On 24 × 14 the depth is 299 and still climbing
+with every file added, and the win never fails.
+
+Both halves are computed twice, by the symmetry-reduced table and by an
+unreduced solver on an ordered index that shares no code with it, and they agree
+on the win count, the deepest win and the white-to-move draw count at
+*n* = 8 and 12…20. Data in
+`artifacts/results/kvkk-transition.csv`; `./egtb kqkk --capture --kvkk` rebuilds
+it, in seconds per board, since K vs K + K is a three-man endgame and needs
+neither the queen nor the four-man table.
+
+**What it does not touch.** Every four-man capture-rule figure in this file is
+*n* ≤ 13, where …K×Q is a black win, so none of them moves. What would change
+past 14 × 14 is the four-man endgame itself: taking the queen would stop being
+fatal and become a draw, and White's problem would change from *keep the queen*
+to something else. That is not computed here — the four-man table at *n* = 15
+is 2.3 × 10⁹ entries.
+
+Here is one such hunt in full, one of the longest — white king c1, black
+kings a1 and e1, Black to play and the white king falls in 17:
+
+```
+$ ./egtb kqkk --capture -n 8 --probe c1,a1,e1 --line
+        black to move: BLACK wins in 33 plies (17 moves)
+        1... ka1-a2  2. Kc1-c2 ke1-e2  3. Kc2-c3 ke2-e3  4. Kc3-c4 ka2-b2
+        5. Kc4-d5 kb2-c3  6. Kd5-e5 kc3-d4  7. Ke5-f5 kd4-d5  8. Kf5-f6 ke3-f4
+        9. Kf6-f7 kf4-f5  10. Kf7-e7 kf5-e6  11. Ke7-f8 kd5-e5  12. Kf8-e8 ke5-d6
+        13. Ke8-f8 ke6-f6  14. Kf8-g8 kd6-e6  15. Kg8-h8 ke6-f7  16. Kh8-h7 kf7-g7
+        17. Kh7-h8 kg7xh8  -- the white king falls
+```
+
+The table's value falls by exactly one at every ply of it — +33, −32, +31, …,
++1 — which is the certificate that neither side has anything better. The last
+two moves are the point of the whole rule set: 16…Kf7-g7 puts a black king
+*beside* the white one, which no mating rule in this program would allow, and
+White cannot take it because the second king on f6 covers g7. He has only h8,
+and 17…Kg7×h8 ends the game. `doc/endgames.pdf` §8.3 plays the whole thing out
+on six boards, six plies at a time, with the moves drawn as numbered arrows.
+
+`K + Q vs K` is the other side of it: with no stalemate to fall into, White
+wins from **every** position with the move, and the deepest is 17 plies against
+19 for ordinary KQK — the ordinary game's extra move is the one spent avoiding
+stalemate.
+
+#### The endgame that results
+
+| 8 × 8, whole board | White wins | draw | Black wins |
+|---|---:|---:|---:|
+| white to move | 6 185 496 (81.1%) | 1 419 192 (18.6%) | 19 824 (0.3%) |
+| black to move | 2 389 096 (31.3%) | 2 567 568 (33.7%) | 2 667 848 (35.0%) |
+
+Those counts are over every placement, including ones where something is
+already hanging, and with two kings that can walk up to anything, plenty is.
+Restricting to **quiet** placements — no black king attacked by the queen, none
+beside the white king, which is exactly the set the strict rules call legal
+with White to move — gives the honest picture:
+
+| 8 × 8, quiet placements (2 534 392 of them) | White wins | draw | Black wins |
+|---|---:|---:|---:|
+| white to move | 1 670 492 (65.9%) | 863 852 (34.1%) | **48** (0.0%) |
+| black to move | 1 137 516 (44.9%) | 1 393 452 (55.0%) | 3 424 (0.1%) |
+
+So over the same 2 534 392 placements on which the strict rule gives White
+**100%**, capture rules give him **65.9%** with the move and 44.9% without it.
+Black's third of the board is not a technicality: it is the phalanx, holding.
+Black almost never *wins* from a quiet placement — he needs something hanging
+first — but he draws by keeping his kings together and his eye on the queen.
+
+The 48 that White loses with the move and nothing hanging are zugzwangs, and
+they all look like this one:
+
+```
+$ ./egtb kqkk --capture -n 8 --single 1
+      nothing hanging, White to move, and lost in 4 plies: wK=a1 wQ=h3 bK=c1 bK=c2
+        3 - . - . - . - Q
+        2 . - k - . - . -
+        1 K . k . - . - .
+          a b c d e f g h
+```
+
+Kings on c1 and c2 cover a2, b1 and b2 between them and defend each other, so
+the white king cannot move and cannot take. The queen is on the far side of the
+board and no move of hers stops …K–b2 followed by …K×a1. **White has a queen
+and is lost because his king is sealed in the corner by two kings that guard
+each other** — a shape with no counterpart in ordinary chess.
+
+The other new thing is that the tempo can decide the whole game:
+
+```
+$ ./egtb kqkk --capture -n 8 --probe a1,h1,g1,a8
+      probe wK=a1 wQ=h1 bK=g1 bK=a8:
+        white to move: White wins in 11 plies (6 moves)
+        black to move: BLACK wins in 35 plies (18 moves)
+```
+
+The queen on h1 stands beside a king on g1. With the move White takes it and
+wins the resulting K + Q vs K; without it Black plays …K×h1 and the two kings
+run down the white one.
+
+#### How the depth grows, under all three rules
+
+One queen, and four ways of asking what she is worth against a king: the
+ordinary endgame, and the same men with a second black king under each of the
+three rules. `doc/endgames.pdf` §7.1 plots these as a single graph.
+
+| *n* | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| KQKK, **capture** rule (White) | 4 | 6 | 9 | 10 | 12 | 13 | 15 | 16 | 18 | 19 | 21 | | | | |
+| KQK, the queen against **one** king | 1 | 4 | 6 | 7 | 8 | 10 | 11 | 12 | 14 | 15 | 17 | 18 | 20 | 21 | 23 |
+| KQKK, **strict** mating rule | 1 | 4 | 4 | 5 | 6 | 7 | 8 | 8 | 9 | 9 | 10 | 11 | 11 | 12 | 13 |
+| KQKK, **loose** mating rule | 1 | 7 | 2 | 2 | 2 | 2 | 2 | 2 | 2 | 2 | 2 | 2 | 2 | 2 | 2 |
+
+Four rows, four different games.
+
+- The **strict** rule is the only one *easier* than ordinary KQK, and it is
+  easier at every board size from 5 upwards: two kings that must both be kept
+  out of check are a liability, not a defence. No formula is claimed for its row
+  — over fifteen points a line and a slightly concave curve are not
+  distinguishable, and the increments from *n* = 6 (1, 1, 1, 0, 1, 0, 1, 1, 0,
+  1, 1) are not regular. What it does show is a difference in kind rather than
+  in constant: mating one king means driving it to the rim, which costs a
+  distance that grows with the board; mating two means arranging a fork, which
+  does not.
+- The **loose** rule flattens to mate in 2 from *n* = 5 on and stays there. Its
+  wins are a fixed handful of corner cages that do not grow with the board, and
+  the bump at *n* = 4 is a board too small to escape on.
+- The **capture** rule is the only one that runs *above* KQK, because White has
+  to win a king and then mate with what is left: roughly the strict line plus a
+  whole KQK. And that row understates it, being White's half — Black's deepest
+  win grows faster still, 18 moves at *n* = 8 and **51** at *n* = 13, since his
+  win is …K×Q followed by a hunt across the whole board.
+
+| *n* | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| capture rule, deepest **black** win (moves) | 3 | 6 | 10 | 12 | 15 | 18 | 24 | 29 | 36 | 42 | 51 |
+
+#### What it took to build
+
+The capture rules break every invariant in §2, which is why they get their own
+solver in `src/kqkkcap.cpp`:
+
+1. **Signed entries.** Black can win, so the table holds wins, draws *and*
+   losses. They are stored **relative to the side to move** — `v > 0` means the
+   mover wins in `v` plies — which differs from `kqkr.cpp`'s White-relative
+   convention, and is the safer form here because both sides win often and the
+   symmetric rule needs no sign flips.
+2. **Three conversions rather than none.** Every capture leaves the table, and
+   none of the destinations is a draw: K × K goes to K + Q vs K, which White
+   wins; …K × Q goes to K vs K + K, which Black wins; and both of those convert
+   again into K vs K. All three are built here, in dependency order, before the
+   four-man table starts.
+3. **The kings may touch**, so the index has to keep the triples the mating
+   tables throw away. `Index` and `IndexKQKK` both take an `allowTouch` flag;
+   with it the 8 × 8 block count rises from 12 600 to 15 722.
+4. **The induction runs on buckets keyed by depth, not in alternation.** A
+   conversion can name any depth — taking a king at ply 1 can lead to a mate 17
+   plies later — so wins and losses do not appear one ply at a time and cannot
+   be swept for in lockstep. Each position enters a bucket at the depth its
+   value names, and the plies in between may be empty.
+
+That last point cost a bug worth recording, because the reference solver hit it
+and the real one did not. Sweeping until nothing changes is sound for a table
+that does not convert: a value of depth *d*+1 needs a successor of depth *d*, so
+a quiet sweep means there is nothing left. A converting table breaks the chain,
+and the unreduced solver stopped early and called a 23-ply black win a draw.
+The brute force also has to take a value only on the sweep matching its
+*magnitude*: taking a win as soon as it is computable records the first one
+found rather than the shortest, which showed up as losses two plies too shallow
+in K vs K + K. Both were caught by the cross-check disagreeing, and both were in
+the checker rather than in the table.
+
+---
+
+### Nothing but kings: K + K + K vs K + K
+
+Take the capture rules above and delete the queen. Nothing about the rules
+changes — they were already stated "for any number of kings a side" — and what
+is left is an endgame with no pieces in it at all: **three white kings against
+two black ones**, the `kings` command.
+
+```
+$ ./egtb kings -n 6 --line
+KKK vs KK under capture rules: every king an ordinary man, the game won by taking the last one
+
+  n      positions  stm     White wins          draws     Black wins   deepest  seconds  checks
+  6        3769920  wtm        3769920              0              0    39 ply     3.51
+                    btm        1996880        1773040              0     0 ply
+      deepest White win: Ka1 Kf1 Ka6 kd2 ka4 -- 39 plies
+      1. Ka1-b1 kd2-d1 2. Kb1-b2 kd1-d2 3. Kf1-f2 kd2-d3 4. Kf2-f3 kd3-d4
+      5. Kb2-c2 ka4-b4 6. Kf3-e2 kb4-c4 7. Ke2-d2 kc4-c5 8. Kc2-d3 kd4-e5
+      9. Kd2-c3 ke5-d5 10. Kc3-b3 kc5-d6 11. Kb3-c4 kd5-e5 12. Kc4-d4 ke5-e6
+      13. Ka6-b6 kd6-d5 14. Kd4xd5 ke6xd5 15. Kb6-b5 kd5-e5 16. Kb5-c5 ke5-f6
+      17. Kd3-e4 kf6-e6 18. Ke4-f4 ke6-f6 19. Kc5-d5 kf6-e6 20. Kd5xe6#
+      no Black win
+      K   vs K    wtm 220/1040/0    btm 0/1040/220        deepest  1/1 ply
+      K   vs KK   wtm 0/5920/15500  btm 0/0/21420         deepest  0/21 ply
+      KK  vs K    wtm 21420/0/0     btm 15500/5920/0      deepest 21/0 ply
+      KK  vs KK   wtm 151090/202340/0  btm 0/202340/151090  deepest 23/23 ply
+      KKK vs K    wtm 235620/0/0    btm 235620/0/0        deepest 17/0 ply
+```
+
+The five smaller tables are printed with the main one because here they are not
+bookkeeping. Each is an endgame with a value of its own, and the last of them
+decides the first.
+
+Rule 4 still cannot fire, one man further along the same argument: immobility
+needs every square beside every one of a side's kings to hold one of its own
+men, a corner king alone has three such squares, so a side needs four men and
+no side here has more than three.
+
+#### What is structurally new
+
+**Material falls on both sides.** Every other table in this file converts in one
+direction only — Black takes a white piece, and the game is over or drawn. Here
+either side may take and neither capture ends anything, so `(w, b)` converts
+into `(w, b-1)` when White takes and `(w-1, b)` when Black does, and the tables
+have to be built up a lattice rather than a chain:
+
+    (1,1)  ->  (2,1), (1,2)  ->  (3,1), (2,2)  ->  (3,2)
+
+Six tables, each reading the two below it as seeds. `kqkkcap.cpp` already had
+three conversions, but all three of its destinations were terminal in the sense
+that the game's character was settled there; here a conversion is just a smaller
+endgame with a value of its own, and four of the five convert again.
+
+**Neither index fits.** There is no white king to put in the fundamental
+triangle and no piece to put in the configuration — only two unordered sets of
+like men, and unlike KBBK's two bishops, both sets move. So `kings.cpp` ranks a
+position as a pair of combinations, colex rank of the white set times the number
+of black sets plus colex rank of the black set, and applies *D*₄ to the white set
+alone. Canonicalising only one side means a white set with a non-trivial
+stabiliser occupies more than one slot, which costs a little memory on the
+O(*n*²) symmetric sets and buys a scheme with no stabiliser arithmetic anywhere
+in the hot path. Each slot of a block stands for exactly 8 / |stab| real
+placements, which is what the census weights by.
+
+#### White wins everything
+
+| *n* | 6 | 7 | 8 | 9 | 10 | 11 |
+|---|---|---|---|---|---|---|
+| placements | 3 769 920 | 19 068 840 | 76 245 120 | 256 215 960 | 752 875 200 | 1 987 925 940 |
+| White to move | **all won** | **all won** | **all won** | **all won** | **all won** | **all won** |
+| deepest win | 39 | 49 | 63 | 83 | 101 | 125 |
+
+(3 × 3, 4 × 4 and 5 × 5 are won too, in 7, 13 and 29 plies. The first two are
+the only boards on which Black ever wins anything, and on both of them
+*whoever moves first wins*: 404 placements on 4 × 4 are a White win with White
+to play and a **Black** win with Black to play.)
+
+Not one drawn placement with White to move, on any board computed. The reason is
+one line of the census, and it is the whole endgame:
+
+> **Up to 14 × 14, K + K + K vs K is won from every placement with *either*
+> side to move.**
+
+So in K + K + K vs K + K, *any* capture White can make wins on the spot. He
+takes a king, and it does not matter whether Black recaptures: without the
+recapture Black is a lone king against three, and with it he is a lone king
+against two, and up to 14 × 14 both of those are lost. White therefore has no
+mating net to find and no zugzwang to arrange. He has one problem only —
+**get a king next to a black king on his own move** — and Black has one
+defence, which is to keep both of his kings out of contact for ever.
+
+That is what the 39-ply line above is doing. Twelve moves of herding, and then
+14. Kd4×d5 ke6×d5, which looks like an even trade and is not: it leaves K + K
+vs K, and on a 6 × 6 board that is a forced win in six more moves.
+
+With Black to move the table says something equally sharp. Every quiet move
+loses, because it hands White a white-to-move placement and those are all won,
+so a black-to-move placement is drawn **precisely when Black has a capture into
+a drawn K + K vs K + K**, and for no other reason. At *n* = 9 that is 86 427 016
+of 256 215 960 placements, a third of them. Black wins outright on 3 × 3 and
+4 × 4, where White's three kings are too crowded to avoid losing one, and on no
+larger board that has been computed.
+
+#### How each of the six grows
+
+All six endgames of the lattice, deepest win in plies, over the boards on which
+each is still won everywhere:
+
+| *n* | 8 | 9 | 10 | 11 | 12 | 13 | **14** | 15 | 16 | 17 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| K vs K | 1 | 1 | 1 | 1 | 1 | 1 | **1** | 1 | 1 | 1 |
+| K vs K+K | 33 | 45 | 55 | 69 | 81 | 99 | **123** | 73 | 73 | 73 |
+| K+K vs K | 33 | 45 | 55 | 69 | 81 | 99 | **123** | 73 | 73 | 73 |
+| K+K vs K+K | 35 | 47 | 57 | 71 | 83 | 101 | **125** | 73 | 73 | 73 |
+| K+K+K vs K | 31 | 37 | 47 | 55 | 65 | 73 | 81 | 91 | 103 | 119 |
+| K+K+K vs K+K | 63 | 83 | 101 | **125** | — | — | — | — | — | — |
+
+**K vs K never grows**: a bare king cannot be forced, so the position is won
+exactly when the kings already touch and the win is one ply, at every *n* from
+3 to 20. **K vs K+K is K+K vs K with the colours exchanged**, and the two
+tables agree to the ply at all eighteen board sizes, transition included —
+built independently and from different seeds, so it is a check rather than a
+definition. That leaves four distinct curves, growing at **14.4**, **14.4**,
+**9.5** and **20.4** plies per board over 8 × 8 to their last fully-won board.
+
+Those slopes say little, because none of the four is linear. The useful measure
+is the local exponent α for which *d* ∝ *n*^α, taken between boards two apart
+so the odd–even wobble cancels:
+
+| *n* → *n*+2 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 |
+|---|---|---|---|---|---|---|---|---|
+| K+K vs K | 2.29 | 2.13 | 2.12 | 2.16 | **2.71** | — | — | — |
+| K+K vs K+K | 2.19 | 2.06 | 2.06 | 2.11 | **2.66** | — | — | — |
+| K+K+K vs K | 1.86 | 1.98 | 1.78 | 1.69 | 1.43 | 1.54 | 1.80 | **2.14** |
+| K+K+K vs K+K | 2.12 | 2.04 | — | — | — | — | — | — |
+
+**This corrects the obvious reading.** The five-man steps do grow — +10, +10,
++14, +20, +18, **+24** from 5 × 5 to 11 × 11 — and a doubling step looks like a
+runaway. It is not: a steady α = 2 produces linearly growing steps by itself,
+and KKK vs KK is flat at α ≈ 2.0–2.1. What preceded the collapse of K+K vs K
+was not the plateau it held for five boards at 2.12–2.29, it was the **single
+jump to 2.71 in the last window before it went**; K+K vs K+K did the same,
+2.11 then 2.66. The five-man endgame shows no sign of that jump at 11 × 11.
+
+**K+K+K vs K is the outlier and the only curve that bends twice**: its exponent
+*falls* from 1.98 to 1.43, then turns and climbs back to 2.14, and the turn
+starts at the 13→15 window — exactly where the endgame underneath it broke.
+
+#### The board that would break it
+
+The depth data does not settle it either way, but the supporting endgames are
+already going:
+
+| | 12 | 13 | **14** | **15** | 16 | 17 |
+|---|---|---|---|---|---|---|
+| K + K vs K, white to move | all won | all won | **all won** | **7.0% won** | 6.0% won | 5.3% won |
+| K + K vs K + K, white to move | 17.2% won | 15.1% won | **13.3% won** | **0.03% won** | 0.02% won | 0.01% won |
+| K + K + K vs K, white to move | all won | all won | all won | **all won** | all won | all won |
+| K + K + K vs K, black to move | all won | all won | all won | **8.9% drawn** | 8.0% drawn | 7.2% drawn |
+
+Three kings still beat one where two no longer can: at 15 × 15 all 415 850 400
+white-to-move placements of K + K + K vs K are won, in at most 91 plies, and at
+16 × 16 and 17 × 17 they still are. What 15 × 15 takes away is the *black*-to-move
+half, where 8.9% of placements turn drawn, every one of them for the same reason:
+Black takes a white king and reaches the K + K vs K that has just stopped being
+won.
+
+And it costs White time in the half he still wins. That endgame's depth column
+runs 31, 37, 47, 55, 65, 73, 81, 91, 103, 119 for *n* = 8…17: steps of +6 to
++10 a board all the way to 15 × 15, and then +12 and +16. The turn begins
+exactly where the endgame underneath it broke, which is what one would expect if
+these transitions propagate up the lattice rather than happening independently
+at each level.
+
+**Both** endgames the five-man table converts into die at 15 × 15, and Black's
+dies in his favour. His entire defence is a capture into a *drawn* K + K vs
+K + K, and the drawn share of that endgame runs 84.9%, 86.7%, then **99.97%**
+at 15 × 15. Up to 14 × 14 he has to pick his capture — there are placements
+offering three where only one saves. Past the transition almost any king he can
+take will do. What survives for White does not even grow with the board — it
+shrinks: 203 232 won placements at 15 × 15, 198 748 at 16 × 16, 195 816 at
+17 × 17, while K + K vs K's surviving set grows like *n*⁴ over the same three
+boards.
+
+That is precisely the clause the five-man win rests on. "Any capture White can
+make wins on the spot" is a theorem about *n* ≤ 14, and it is false at 15 × 15:
+there, White taking a king can be answered by Black taking one back into a drawn
+K + K vs K. Whether K + K + K vs K + K survives that is **not settled here**,
+and the depth data does not settle it either way: the five-man line is flat at
+α ≈ 2.05 and shows none of the last-window jump that both collapsing endgames
+made, which is evidence *against* an imminent transition — but the clause the
+win rests on is false at 15 × 15 whatever the depth is doing at 11 × 11. What
+would settle it is out of reach by four board sizes: 15 × 15 is 5.9 × 10⁹
+canonical slots per side to move, 24 GB at two bytes an entry, against the
+2.4 GB that 12 × 12 costs.
+
+#### Checks
+
+The same three the rest of the file uses, and one that comes free:
+
+* every entry of every one of the six tables re-derived from its successors by a
+  second forward generator, which picks the successor table by counting men
+  rather than by a precomputed pointer — `--verify`, 0 mismatches on all six
+  tables at every board from 3 × 3 to 8 × 8;
+* the whole lattice solved again with **no index and no material split at all**,
+  as one hash of every state of every material value-iterated to a fixpoint, and
+  compared placement by placement — agrees on every board it has been run on,
+  *n* ≤ 6, which checks the combinatorial index, the *D*₄ reduction and the
+  conversion seeding together;
+* the symmetry-reduced solver against an unreduced one on a plain ordered index:
+  identical counts, depths and deepest placements at *n* ≤ 5, which is what
+  makes the orbit weighting trustworthy;
+* and K + K vs K falls out of this table as a sub-endgame, so it reproduces
+  `artifacts/results/kvkk-transition.csv` — computed by a different solver in
+  this repository, sharing no index, no move generator and no induction — on the
+  win count, the deepest win *and* the draw count at every board from 8 × 8 to
+  20 × 20, transition and frozen 73-ply depth included.
+
+```
+./egtb kings -n 8                          # the census and the deepest win
+./egtb kings -n 6 --line                   # play the longest win out
+./egtb kings --min 3 --max 6 --verify --brute
+./egtb kings --white 2 --black 1 --min 8 --max 20   # the phalanx, and its collapse
+./egtb kings --white 3 --black 1 --min 8 --max 16   # three kings against one
+./egtb kings -n 8 --probe a1,b1,c1,e4,f4   # one placement, both sides to move
+```
+
+---
+
+### Tables larger than memory
+
+The two value arrays are the only large allocations here, and past about 10 GiB
+they stop fitting: a 15 × 15 KNNNK table is 21.6 GiB against 16 GB of RAM.
+Letting the OS page that through swap thrashes — an anonymous dirty page has to
+be written to swap and read back before it can be touched again, and the
+induction touches most of the table on every early ply.
+
+`--scratch DIR` backs the same bytes with a file instead, mapped `MAP_SHARED`
+and unlinked as soon as it is created, so the space returns when the process
+exits however it exits. The access pattern is what makes this pay rather than
+merely move the problem: phase A sweeps each block's configurations in index
+order and walks the blocks in order, so an early ply is essentially a
+sequential streaming pass, and only the king retractions — whose count is
+proportional to the frontier, not the table — jump between blocks.
+
+```sh
+./egtb gen -n 14 --endgame knnnk --scratch /var/tmp
+```
+
+It costs roughly a factor of four in wall time on this machine and nothing in
+correctness: the test suite builds four endgames both ways and requires the
+saved tables to be **byte-for-byte identical**. It is not worth using below
+about 10 GiB, where anonymous memory is simply faster.
+
+### KNNK and KNNNK: knights, and the capture that is not free
+
+These are the last two endgames here in which Black has a bare king, and they
+are here because of a boundary case in the invariant §2 rests on.
+
+#### Two knights: mates without zugzwang
+
+The textbook fact is that two knights cannot *force* mate. Building the table
+turns that into two separate, checkable statements — and the difference between
+them is the whole point.
+
+```
+$ ./egtb gen -n 8 --endgame knnk
+-- whole board (no symmetry reduction) -----------------------
+white to move   legal        5749652   win            616   draw      5749036
+black to move   legal        6832644  loss            120   draw      6832524
+                 mate            120  stalemate      3864   knight en prise  1183760
+longest win  1 plies = mate in 1
+```
+
+| | | holds for |
+|---|---|---|
+| mate positions | **16*n* − 8** | *n* ≥ 4 |
+| white-to-move wins | **104*n* − 216** | *n* ≥ 5 |
+| deepest white win | **1 ply** | every *n* from 3 to 16 |
+
+Mates exist — 120 of them on 8 × 8, and the count is exactly linear in the
+board. What does not exist is *zugzwang*: the deepest win is one ply on every
+board size, so **White wins only where he mates on the move**, and black-to-move
+losses equal mates exactly. A position is lost only when it is already over.
+
+There is one exception and it is the smallest board. On 3 × 3 there are 36
+black-to-move losses against 32 mates: one symmetry class, four placements, in
+which Black has moves, all of which step into mate. Both figures agree with the
+unreduced solver.
+
+Below this, `--endgame knk` gives the invariant in its strongest form: **no mate
+exists at all**, checked exhaustively for every board from 3 × 3 to 24 × 24. Its
+only terminal is stalemate — exactly 40 on every board from 4 × 4 up, all with
+the black king in a corner, the same forty however much board is added round
+them.
+
+#### The same two knights under capture rules
+
+`--capture` plays §5's capture rules instead: every king is an ordinary man
+that may move onto attacked squares and may be taken, and a player wins by
+taking the opponent's last king. For this material that reduces to one clause.
+The theorem says the capture game is chess with stalemate made a loss and
+checkmate made a draw *when the mated side is totally immobile* — and total
+immobility cannot happen here, because a king is blocked only by its own men
+and the edge, a cornered king has three on-board neighbours, and two knights can
+block at most two. So **capture rules on KNNK are exactly chess with stalemate
+scored as a loss**.
+
+That one clause is worth the endgame, because two knights cannot force mate but
+they *can* force stalemate.
+
+| *n* | | 4 | 6 | 8 | 12 | **14** | **15** | 16 |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| **chess** | White wins | 120 | 408 | 616 | 1 032 | 1 240 | 1 344 | 1 448 |
+| | share | 1.28% | 0.09% | 0.011% | 0.0006% | 0.0002% | 0.0001% | 0.00008% |
+| **capture** | White wins | 9 348 | 447 832 | 5 713 976 | 179 381 448 | 644 455 884 | 5 162 568 | 5 461 920 |
+| | share | **100%** | **100%** | 99.38% | 99.85% | **99.92%** | **0.45%** | 0.28% |
+| | deepest (plies) | 15 | 57 | 51 | 111 | **219** | 97 | 95 |
+
+On 8 × 8 the same men go from **616** won placements to **5 713 976**, a factor
+of 9 276, and up to 6 × 6 White wins *every* legal position. Two figures say
+the clause does exactly what it claims: the **mate count is identical under both
+rules** (16*n* − 8 either way), and the **chess stalemate count equals the
+capture-rule loss count exactly** — 3 864 at 8 × 8, both.
+
+**And then it has a critical board size.** The depth runs away — 51, 61, 75, 91,
+111, 151, **219** plies for *n* = 8…14 — and then the win collapses to 0.45% and
+the depth drops to 97. One placement, the same four men on the same squares
+throughout:
+
+| *n* | 8 | 10 | 11 | 12 | 13 | **14** | **15** |
+|---|---|---|---|---|---|---|---|
+| wK a1, wN c2, wN c3, bK e5 | mate in 20 | 32 | 41 | 50 | 70 | **103** | **draw** |
+
+It is the KQKR fortress of §5 in different material. Two knights have to walk a
+king into a corner to stalemate it, and past 14 × 14 he can go round them.
+
+The sharpest single example is a **quiet** placement — nothing attacked at all,
+in the sense §5 uses for the KQKR draws. wK a1, wN e1, wN c3, bK c1: the black
+king is not in check, neither knight stands on a square he attacks, and the
+kings are two files apart. He has five squares on the board and **four of them
+are covered** (b1 and d1 by the knight on c3, b2 by the white king, c2 by the
+knight on e1), and under these rules stepping onto a covered square is legal and
+loses at once. Only d2 is free, so Black has exactly one move and White is one
+tempo from the stalemate that wins.
+
+| *n* | 12 | 13 | **14** | **15** | 16 |
+|---|---|---|---|---|---|
+| wK a1, wN e1, wN c3, bK c1 | mate in 52 | 71 | **104** | **draw** | draw |
+
+Nothing is hanging, no threat is outstanding and no tempo is at stake. **The
+draw is bought by the extra rank**, and by nothing else.
+
+**The knight below does the same thing sooner.** K+N vs K under the same rules
+wins 99.5% of 6 × 6 placements — a lone knight really can force a bare king into
+stalemate on a small enough board — then collapses at *n* = 7 to exactly
+**2 900 placements on every board from 10 × 10 up**, never deeper than 27 plies.
+That is why the KNNK capture table converts into a KNK capture table instead of
+scoring …K×N as a draw: it is not one.
+
+**What the cross-check caught here.** The unreduced solver disagreed, and it was
+right. Phase B's two-phase alternation assumes a black-to-move loss always has
+value *d* + 2; a **conversion can name any depth**, and KNK under capture rules
+reaches 65 plies, so values were written that the alternation never came back
+for. KNNNK had escaped it only because the KNNK table beneath it is one ply
+deep. The fix is the bucketed induction the capture rules already needed, in the
+smallest form a one-way conversion allows, allocated only when a table actually
+converts. Behind the numbers: Bellman re-derivation for 10 ≤ *n* ≤ 16 including
+both sides of the transition, the unreduced solver for *n* ≤ 10, and a third
+solver written from the capture rules rather than from the theorem, which
+reproduces the table exactly at *n* = 4 and 5 with every depth larger by exactly
+two plies — the capture game really playing out Black's forced step and White's
+capture.
+
+#### Three knights: the one conversion that could have been assumed away
+
+Because K+N+N vs K is *sometimes* a white win, KNNNK cannot score …K×N as a
+draw. It converts, which makes it the second endgame here to do so after KQKR,
+and the first whose conversion runs one way only: Black can capture and White
+never can, and the table it converts into has wins and draws but no losses, so
+the entries stay unsigned bytes. The solver refuses to run without its
+sub-table attached, and the test suite exercises that refusal rather than
+trusting it.
+
+The index needs one new thing, the natural extension of KBBK's unordered pair:
+three like knights are an **unordered triple**, so a configuration is one of
+C(*n*², 3) rather than *n*⁶ — six times smaller than the ordered encoding, for
+the same reason two like bishops halve it.
+
+```
+$ ./egtb knnnk --min 8 --max 12 --draws
+  n   king prs     entries/side        wtm win       wtm draw    draw%  deepest seconds
+  8        462         19248768      104116284        1342972   1.273%    41 ply    1.19
+      draws  loose 1274044 (94.9%)  guarded 128 (0.0%)  quiet 68800 (5.1%)
+      wins   loose 24589660 (23.6%)  guarded 6038088 (5.8%)  quiet 73488536 (70.6%)
+```
+
+**Three knights do not win from everywhere** — the only bare-king endgame here
+that cannot say they do. One 8 × 8 placement in eighty is drawn, and the share
+falls steadily with the board (1.273%, 0.877%, 0.616%, 0.442%, 0.324%, 0.242%,
+0.184%, 0.142% for *n* = 8…15), because it measures how often the black king
+starts within reach of a knight.
+
+Sorting the placements by what the black king attacks — *loose* = a knight it
+attacks and nothing defends, *guarded* = attacked but defended, *quiet* =
+nothing attacked at all — gives the reason, and unlike the KQKR fortress guess
+in §5 this one survives measurement:
+
+| *n* | drawn: loose | guarded | quiet | won: loose | guarded | quiet |
+|---|---:|---:|---:|---:|---:|---:|
+| 8 | **94.9%** | 0.0% | 5.1% | 23.6% | 5.8% | 70.6% |
+| 10 | **90.6%** | 0.0% | 9.4% | 17.4% | 2.7% | 80.0% |
+| 12 | **88.5%** | 0.0% | 11.5% | 13.1% | 1.4% | 85.6% |
+
+A hanging knight is present in nine drawn positions in ten and one won position
+in eight. Two smaller things fall out: the *guarded* column is **exactly 128 on
+every board from 7 × 7 to 12 × 12**, a fixed handful that does not grow with the
+board at all; and the *quiet* draws climb steadily as a share of the draws
+(0.1% at *n* = 5 to 11.5% at *n* = 12) while draws overall get rarer.
+
+**On the depth, the honest answer is that this range cannot settle it.** Growth
+is about four moves per unit of board size over 8 ≤ *n* ≤ 15 — but §2 argues
+that a knight-only endgame ought to be *quadratic*, since a knight needs Θ(*n*)
+moves to cross the board, and three knights are as knight-only as it gets. The
+measurement does not separate the two:
+
+| boards compared | 6→8 | 7→9 | 8→10 | 9→11 | 10→12 | 11→13 | 12→14 | 13→15 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| KNNNK, moves per unit *n* | 2.50 | 3.50 | 4.00 | 4.00 | 3.50 | 4.00 | **4.50** | **4.50** |
+| KNNNK, local exponent α | 0.95 | 1.31 | 1.45 | 1.38 | 1.19 | 1.30 | 1.45 | 1.39 |
+| KQK, local exponent α (**exactly linear**) | 1.24 | 1.27 | 0.82 | 1.20 | 1.22 | 1.16 | 1.18 | 1.14 |
+
+KQK's depth law is exact and linear, so its spread over the same six
+comparisons is the noise floor: 0.82–1.27 against KNNNK's 0.95–1.45. Those
+overlap over most of their length. KBNK needed the range 9–21 before its early
+and late slopes parted company. The slope does read 4.50 for the last **two**
+comparisons — one reading at the end of a range is a wobble, two in a row is the
+start of a trend, though still only two. The 15 × 15 table is 21.6 GiB and took
+four and a quarter hours built against a file; every board after it doubles.
+
+**A quiet draw, on the largest board built.** The *quiet* draws are the
+interesting ones, and here is one at 15 × 15 with nothing whatever attacked —
+the black king is not in check from any knight, no knight stands on a square he
+attacks, and the kings are three squares apart:
+
+```
+wK f5   wN a1   wN e5   wN f6   bK c3     white to move: DRAW
+```
+
+Every white man is within three squares of the black king, so the draw is not a
+matter of White's army being elsewhere. **The a1 knight is trapped.** It has
+exactly two moves, b3 and c2, and both are attacked by the black king and
+defended by nothing — the e5 and f6 knights reach neither, and the white king is
+three squares from one and four from the other. Leaving it there does not help:
+the black king is **two** king-moves from a1 and the white king is **five**, so
+Black arrives first whatever White does. A knight goes, what remains is
+K+N+N vs K, and that White wins only where he mates on the move.
+
+The trap is a local geometry, not a board-size effect: the same five squares are
+drawn at 15 × 15, 13 × 13, 12 × 12, 10 × 10 and 8 × 8, and at the small sizes
+the value takes a second —
+
+```sh
+./egtb gen -n 8 --endgame knnnk --probe --wk f5 --wp1 a1 --wp2 e5 --wp3 f6 --bk c3
+```
+
+That is the opposite of the two-knight capture-rule draw above, where the extra
+rank was the *only* thing buying the draw. Both are quiet; one is bought by
+geometry any board has, the other by room only a big board has.
+
+The deepest win has the same shape on every board from 8 × 8 up, and it is not
+the black king in a corner. It is the **white** king in one, with two of his own
+knights on the two squares he needs to get out (wK a1, wN b1, wN a2), and the
+third knight far off on the first rank beside the black king. The worst case is
+White untangling his own pieces before the hunt can start.
+
+---
+
+## 6. Building and using it
+
+```sh
+make            # builds ./egtb, with ./kqk, ./krk, ./kbbk and ./kbnk
+                # as symlinks to it
+make test       # exhaustive self-test up to 8x8, all three endgames
+./tests/run_tests.sh   # the full gate: verification, determinism, i/o, the laws
+```
+
+### Command line
+
+```
+egtb gen -n N [--endgame E] [-o FILE] [--threads T] [--rle]
+                            [--verify] [--stride S] [--hist]
+egtb stats   -f FILE [--hist]
+egtb probe   -f FILE --wk SQ --bk SQ <piece squares> [--btm] [--board]
+egtb line    -f FILE --wk SQ --bk SQ <piece squares> [--btm] [--board]
+egtb longest -f FILE [--board]
+egtb verify  -f FILE [--stride S]
+egtb bruteforce -n N [--endgame E]
+egtb policy   [--min N] [--max N] [-n N] [--oracle] [--line] [--rules]
+egtb kqkr     [--min N] [--max N] [-n N] [--verify] [--brute] [--selfcheck]
+                           [--bishop]   # KQKB: Black's man is a bishop
+                           [--hist] [--draws] [--line] [--probe SQ,SQ,SQ,SQ]
+egtb kqkk     [--min N] [--max N] [-n N] [--loose | --capture] [--verify]
+                           [--brute] [--selfcheck] [--sizes] [--stats] [--hist]
+                           [--mates [N]] [--single [N]] [--line] [--board]
+                           [--probe SQ,SQ,SQ,SQ] [-o FILE] [-f FILE] [--rle]
+egtb kqkbb    [--min N] [--max N] [-n N] [--verify] [--brute] [--selfcheck]
+                           [--hist] [--line] [--probe wK,wQ,bK,bB,bB]
+egtb kings    [--min N] [--max N] [-n N] [--white W] [--black B]
+                           [--verify] [--brute] [--line] [--progress]
+                           [--probe SQ,...]
+egtb selftest [--max N] [--brute N]
+egtb sizes    [--max N] [--endgame E]
+```
+
+**Choosing the endgame.** `--endgame` takes `kqk`, `krk`, `kbbk` or `kbnk`;
+`--queen`, `--rook`, `--bishops` and `--kbnk` are shorthands. Running the
+binary under the name `kqk`, `krk`, `kbbk` or `kbnk` — `make` leaves
+symlinks — picks that endgame, so `./kbnk gen -n 8` and
+`./egtb gen -n 8 --kbnk` are the same command. Only `gen`, `sizes`,
+`bruteforce` and `selftest` need it: **a table
+file records which endgame it holds**, so `stats`, `probe`, `line`, `longest`
+and `verify` take it from the file.
+
+**Naming the pieces.** Squares are given under the names the pieces have:
+`--wq` for KQK, `--wr` for KRK, `--wb1` and `--wb2` for KBBK, `--wb` and
+`--wn` for KBNK. `--wp1` and `--wp2` work for any endgame. In `line` output a
+lone queen or rook is written `Qd7`, but a two-piece endgame writes
+from-square and to-square — `Bd1-f3` — since `Bf3` would not say which bishop
+moved in KBBK.
+
+Squares are algebraic (`d4`) up to *n* = 26 and `file,rank` (0-based) beyond;
+both forms are accepted on any board. `--btm` means Black is to move.
+`--stride S` verifies a deterministic 1-in-*S* sample, for boards where a full
+re-derivation would take longer than the build.
+
+```sh
+./egtb gen -n 20 -o kqk20.kqk --rle --verify
+./egtb probe -f kqk20.kqk --wk a1 --wq c3 --bk d4 --btm      # -> draw, queen falls
+./egtb line  -f kqk20.kqk --wk a1 --wq b2 --bk j10 --board
+
+./krk gen -n 20 -o krk20.krk --rle --verify
+./krk longest -f krk20.krk --board
+
+./kbbk gen -n 12 -o kbbk12.kbbk --rle --verify
+./kbbk probe -f kbbk12.kbbk --wk a1 --wb1 b2 --wb2 d4 --bk f5   # -> draw, same colour
+./kbbk probe -f kbbk12.kbbk --wk a1 --wb1 b2 --wb2 c4 --bk f5   # -> a win
+
+./kbnk gen -n 12 -o kbnk12.kbnk --rle --verify
+./kbnk longest -f kbnk12.kbnk --board
+./egtb bruteforce -n 8 --kbnk        # unreduced cross-check, every placement
+```
+
+**KQKK** has a command of its own rather than an `--endgame`, because it shares
+neither the index nor the solver. `--probe` takes the four squares in the order
+white king, queen, black king, black king; the two black kings are
+interchangeable, so their order between themselves does not matter. Under
+`--capture`, **three** squares instead of four address the K vs K + K
+sub-table — white king, black king, black king — which is otherwise reachable
+only through the …K×Q that converts into it:
+
+```
+$ ./egtb kqkk --capture -n 8 --probe c1,a1,e1 --line
+      probe K vs K+K:  wK c1  bK a1  bK e1
+        white to move: BLACK wins in 32 plies (16 moves)
+        black to move: BLACK wins in 33 plies (17 moves)
+        1. Kc1-c2 ke1-e2 2. Kc2-c3 ke2-e3 3. Kc3-c4 ka1-b2 4. Kc4-d5 kb2-c3
+        ... 15. Kh8-h7 kf7-g7 16. Kh7-h8 kg7xh8  -- the white king falls
+``` Squares are
+named the same way as everywhere else, and `-o` / `-f` write and read a table
+whose header carries the rule set, so a `--loose` table can never be read as a
+strict one.
+
+```sh
+./egtb kqkk -n 8                                  # census and the deepest win
+./egtb kqkk -n 8 --stats --hist                   # the full census, by depth
+./egtb kqkk -n 8 --line --board                   # play out the deepest win
+./egtb kqkk -n 8 --mates 3                        # what a double mate looks like
+./egtb kqkk -n 8 --single 3                       # ... and a single one, which is a draw
+./egtb kqkk -n 8 --probe c3,c2,a2,b1              # a mate found by hand
+./egtb kqkk -n 8 --loose --probe c3,c2,a2,b1      # the same placement, other rule: a draw
+./egtb kqkk -n 12 -o kqkk12.kqkk                  # write it out
+./egtb kqkk -f kqkk12.kqkk --line                 # read it back; the rules come with it
+./egtb kqkk --min 4 --max 6 --verify --brute      # both cross-checks
+./egtb kqkk --min 4 --max 12 --selfcheck          # generator and symmetry class
+./egtb kqkk --min 8 --max 24 --sizes              # what each board would cost
+```
+
+`--capture` selects the third rule set, in which every king is an ordinary
+capturable man and a player wins by taking all of the opponent's, with no mate
+anywhere.  It is a different table --
+signed, and with three sub-endgames of its own -- so it answers the same
+command with its own output; `--single` there lists the quiet placements in
+which the side to move is already lost, and `-o`/`-f` write and read all four
+of its tables at once.
+
+```sh
+./egtb kqkk --capture -n 8 --stats                # the census, with the sub-endgames
+./egtb kqkk --capture -n 8 --line                 # the deepest white win, played out
+./egtb kqkk --capture -n 8 --single 1             # a zugzwang: White has a queen and is lost
+./egtb kqkk --capture -n 8 --probe a1,h1,g1,a8    # whoever moves first wins this one
+./egtb kqkk --capture --min 3 --max 6 --verify --brute
+```
+
+```
+$ ./egtb kqkk -n 8 --line
+      deepest white win: wK=a1 wQ=d1 bK=f5 bK=f6 -- mate in 7
+      1. Ka1-b1 kf5-g6 2. Kb1-c2 kg6-f7 3. Qd1-d5 kf7-g7 4. Qd5-h5 kg7-g8
+      5. Qh5-h6 kf6-f7 6. Kc2-d2 kf7-e8 7. Qh6-g6#
+```
+
+Moves are written from-to throughout, including White's: with two black kings
+on the board `kd7` would not say which one moved. The last move forks them —
+the queen on g6 attacks g8 up the file and e8 down the diagonal — and neither
+king can step off its own ray and block the other's with one move.
+
+One black king on a1, three endgames, three answers. A queen on b2 covers a1
+down the diagonal and is defended by its own king, so it is mate; a rook on b2
+does not attack a1 at all, so the same placement is stalemate; and two bishops
+need a third man to seal the corner — b2 gives the check on the dark diagonal,
+c4 covers a2 on the light one, and the king covers b1 and defends b2:
+
+```sh
+$ ./egtb probe  -f kqk8.kqk   --wk c3 --wq b2           --bk a1 --btm
+wK=c3 wQ=b2 bK=a1, black to move: black is lost, mate in 0 (0 plies)
+$ ./krk probe  -f krk8.krk   --wk c3 --wr b2           --bk a1 --btm
+wK=c3 wR=b2 bK=a1, black to move: draw
+$ ./kbbk probe -f kbbk8.kbbk --wk c2 --wb1 b2 --wb2 c4 --bk a1 --btm
+wK=c2 wB1=b2 wB2=c4 bK=a1, black to move: black is lost, mate in 0 (0 plies)
+```
+
+`./tests/run_tests.sh` checks all three, and checks that a far-flung second
+bishop is *not* enough: with Bb2 and Bh6 the king simply walks out to a2.
+
+### Library
+
+```cpp
+#include "table.hpp"
+using namespace kqk;
+
+Table tb(20);                            // KQK
+Table tr(20, Endgame::KRK);              // KRK
+Table tw(12, Endgame::KBBK);             // KBBK
+Table tn(12, Endgame::KBNK);             // KBNK
+tb.generate(8, false);                   // or Table::load("kqk20.kqk")
+
+Pos p;
+p.wk = wk; p.bk = bk;
+p.wp[0] = firstPiece;                    // p.wp[1] too, when mat.np == 2
+
+auto r = tb.probe(p, /*whiteToMove=*/true);
+if (r.outcome == Outcome::Win) printf("mate in %d\n", r.moves);
+
+Move m;
+tb.bestMove(p, true, m);                 // m.after is the resulting Pos
+auto pv = tb.principalVariation(p, true);
+```
+
+A position is always `Pos{wk, bk, wp[]}`; `tb.mat` says how many of `wp` are in
+use and what they are.
+
+KQKK does not share `Table`, because Black has two kings rather than White
+having two pieces. It has the same shape:
+
+```cpp
+TableKQKK tk(12);                        // strict rules; KkRules::Loose for the other
+tk.generate(8, false);                   // or TableKQKK::load("kqkk12.kqkk")
+
+PosKK q{ wk, wq, blackKing1, blackKing2 };   // the two are interchangeable
+auto r = tk.probe(q, /*whiteToMove=*/false);
+if (r.outcome == Outcome::Loss && r.plies == 0) printf("both kings mated\n");
+
+PosKK next; bool tookTheQueen;
+tk.bestMove(q, false, next, tookTheQueen);
+auto pv = tk.principalVariation(q, false);
+```
+
+`examples/probe_example.cpp` is a complete, compilable version covering the four
+shared-solver endgames and both readings of KQKK.
+
+### File format
+
+A fixed header, the census, then the two value arrays, optionally run-length
+encoded (`--rle`). The header records the endgame, so a file is self-describing
+and cannot be probed as the wrong one. The format is at version 3; readers
+still accept versions 1 (KQK only) and 2 (adds KRK), and the version-3 header
+is deliberately the older one plus a suffix so that staying compatible is a
+matter of appending fields — which is how KBNK was added without touching it.
+
+RLE is streaming and dependency-free. It reaches about 1.4× on KQK data, 1.8×
+on KRK and rather more on the four-man tables, whose large drawn regions and
+dead diagonals run long; if size
+matters, pipe a raw file through `xz`, which reaches about 19× (4.09 MB →
+214 KB at *n* = 16). The in-memory representation — two bytes per symmetry
+class — is the one the design optimises.
+
+---
+
+## 7. Layout
+
+| file | contents |
+|---|---|
+| `src/geometry.hpp` | board arithmetic, *D*₄, the fundamental triangle, the materials, how each piece moves, *O*(1) attacks |
+| `src/index.hpp` | canonical form, king-pair enumeration, the configuration codec, the dense index |
+| `src/indexkk.hpp` | the same for KQKK, where the block key is a king *triple* |
+| `src/movegen.hpp` | legal move generation (the reference generator) |
+| `src/solver.cpp` | parallel retrograde analysis |
+| `src/verify.cpp` | independent re-derivation of every entry |
+| `src/brute.cpp` | the unreduced reference solver and the cross-check |
+| `src/stats.cpp` | census over classes and over the whole board |
+| `src/probe.cpp` | lookups, best move, principal variation |
+| `src/io.cpp` | file format |
+| `src/kqkr.cpp` | KQKR: signed entries, conversion into KQK and KRK, four-way induction |
+| `src/kqkk.cpp` | KQKK: two black kings, both rule sets, its own solver, verifier and brute force |
+| `src/kqkkcap.cpp` | KQKK under capture rules: signed entries, three sub-endgames, a bucketed induction |
+| `src/kings.cpp` | KKK vs KK: kings only, capture rules, a six-table conversion lattice, an index of two unordered like sets |
+| `src/main.cpp` | command line |
+
+### What adding each endgame actually took
+
+**The rook.** An early draft of this section predicted that KRK would need "the
+removal of two shortcuts that KQK specifically licenses: that White never
+captures, and that a white-to-move position is never a loss." Both predictions
+were wrong. Neither shortcut is about the queen; both follow from Black having
+a lone king, which is equally true in KRK. What the rook actually needed was
+the ray set. The eight directions alternate orthogonal and diagonal, so the
+orthogonal four are exactly the even indices and the diagonal four the odd
+ones: a rook is a queen walked from index 0 with stride 2, and a bishop one
+walked from index 1 with stride 2. The attack test drops one term.
+
+**The bishop and knight.** Two things that had never been exercised before,
+and each of them was a bug.
+
+*A knight is not a ray.* `forEachMove` in `geometry.hpp` now branches on that,
+and — more useful than the branch itself — it is now the **single** definition
+of how a piece moves, shared by the forward generator and by the retrograde
+pass. Previously the solver walked rays by hand and `movegen.hpp` walked them
+again, with a comment noting that the two must agree and that `verify` checks
+it. Adding a third movement pattern made writing it twice untenable, so it is
+written once. That every piece here moves *symmetrically* is what lets one
+function serve both directions: the squares a piece can move to are exactly the
+squares it could have come from.
+
+*Two bugs, both caught.* Neither would have survived the test suite, and
+neither was found by reading the code:
+
+1. **Phantom slots.** The ordered-pair index has *n*² entries whose two squares
+   coincide. Those denote nothing, but initialisation was treating them as real
+   positions — and a phantom in which one piece stands on its own square reads
+   as *checkmate* surprisingly often, because it both gives check and covers
+   the flight squares. Phase A then retracted winning moves out of a
+   checkmate that does not exist. The fix is `Index::cfgLive`, one predicate
+   that every caller deciding whether a slot is alive now shares, because the
+   bug was two places disagreeing about it.
+2. **Capturing a defended piece.** Phase B's fast path treated "the black king
+   steps onto a white piece" as a capture, hence a draw. With one white piece
+   that is sound: squares next to the white king are already excluded, so
+   nothing can defend it. With two it is wrong — and it is wrong in a way that
+   *hides*. In KBBK two bishops can only defend each other along a shared
+   diagonal, so only when they are the same colour, and those positions are
+   drawn anyway; the bug was live in KBBK for as long as KBBK existed and
+   changed not one entry. A bishop and a knight defend each other freely, and
+   there it cost the table 2 816 lost positions on a 5 × 5 board and inflated
+   the 8 × 8 maximum from mate in 33 to mate in 35.
+
+The second is the better argument for keeping both the verifier and the
+unreduced solver: they flagged the same positions independently, and the wrong
+answer was a plausible-looking number rather than a crash.
+
+**The second bishop.** This one is a real change of arity, and it is worth
+saying what did and did not move.
+
+*Did not move.* Every structural fact in §2 survives, including the one that
+looks most like it should not: a capture is still an immediate draw, because
+taking one bishop leaves KBK. So there are still no un-captures, still no
+conversion to another table, still a strict two-phase alternation, and still
+two bytes per symmetry class. The verifier, the census, the RLE codec and the
+dirty-block scheme are untouched.
+
+*Did move.* Three things.
+
+1. **The index gained a configuration codec.** Where a slot used to be keyed on
+   a square it is now keyed on an unordered pair, and canonicalisation compares
+   sorted pairs rather than single squares (§3).
+2. **The solver and the move generator were templated on the endgame.** Phase A
+   now retracts each of White's pieces in turn, with the other one acting as an
+   extra ray blocker; phase B's legality test gained the same second blocker.
+   Both are `if constexpr`-guarded on the piece count, and the piece kinds are
+   template arguments rather than fields, so the ray set and the attack test
+   still fold to constants.
+
+   That last part was not free the first time. A first cut passed the piece
+   kind as a runtime argument and read it out of `Material` inside the loops;
+   because the atomic stores to the value arrays may, as far as the compiler
+   knows, alias that memory, the loads could not be hoisted, and every phase
+   ran about 11% slower. Templating on the `Endgame` and giving the one-piece
+   case a scalar path (rather than a one-element array) recovers it: KRK now
+   builds marginally *faster* than before, and KQK is within a few percent —
+   which on this machine is inside the run-to-run spread from thermal
+   throttling, so no stronger claim is made. What is exact rather than
+   approximate: **KQK and KRK reproduce their previous tables entry for entry**,
+   checked against the version-2 files for *n* = 8, 12, 16, 20 and 24.
+3. **One optimisation stopped firing**, as §4 notes, because KBBK blocks always
+   contain positions that never resolve.
+
+The change touched every file, but almost all of it is plumbing for a `Pos`
+that carries an array rather than a single square; the genuinely new ideas are
+the pair codec and the second ray blocker.
+
+**The second black king.** KQKK is the first endgame here that adds a man to
+*Black* without arming Black, and it is worth saying what that did and did not
+cost.
+
+*Did not move.* All four structural facts in §2, and everything that rests on
+them: the strict two-phase alternation, one-byte entries, no un-captures, no
+conversion, and the counter-free phase B. `kqkk.cpp` is `solver.cpp`'s shape
+with the queen standing where White's piece used to, and its retraction is
+still the forward generator run backwards, for the same reason — a king and a
+queen both move symmetrically.
+
+*Did move.* Three things.
+
+1. **The block key changed, rather than the configuration codec.** Every
+   previous endgame keyed a block on the king pair and varied what went into
+   the configuration; this one keys on the king *triple* and puts only the
+   queen in the configuration (§3). It is the one place where a second black
+   man cannot be handled by widening the configuration, because the man moves
+   on Black's turn.
+2. **The rule set became a template parameter.** "A mate counts only when both
+   kings are mated at once" has two readings, they differ in one predicate, and
+   which one is meant is a question about the variant rather than about the
+   program — so the program computes both, `restOk` is templated on which, and
+   the file header records what a table holds. It costs one `if constexpr` and
+   nothing at run time.
+3. **Phase B's re-test doubled.** Black has up to sixteen moves rather than
+   eight, either king being allowed to move, and phase B re-tests every
+   candidate by forward generation. That is the only place the second king
+   costs anything — and it is still the right design, because a successor
+   counter would be unsound on a symmetry-reduced index for the reason in §4,
+   second king or not.
+
+*And one thing stopped paying.* Run-length encoding compresses every other
+table here and inflates this one, for the reason in §5, so the writer encodes,
+compares and keeps whichever is smaller.
+
+### Extending further
+
+The remaining boundary is the one drawn in §2, and it is not about piece count.
+**KRRK, KQQK and KQRK are out of reach of this architecture** even though they
+are two-piece endgames just like KBBK and KBNK, because a capture converts to a
+*won* endgame rather than a drawn one; they need the table they convert into,
+and with it a conversion metric. **KQKR and anything else that gives Black a
+piece** breaks the other invariant: Black can then give check, so the two-phase
+alternation becomes a general fixed point and the counter-free phase B argument
+in §4 has to be revisited.
+
+KQKK says where that boundary actually lies, which is not at the number of
+black men. A second black *king* adds a man to Black without arming Black: it
+cannot check, it cannot be captured, and the one capture it can make is still
+an immediate draw. Every invariant survives and only the index has to change.
+What breaks the architecture is Black being able to *do* something, not Black
+having something.
+
+And KQKK under capture rules says the rest of it: the invariants are not about
+the men at all but about the *rules*. The same four men, with mate replaced by
+the capture it stands for, break all four bullets at once — Black can check,
+White can capture, no capture is drawn, and the table converts three ways —
+while the men on the board have not moved. §5 has what that costs.
+
+With those two exclusions, the three-man and four-man materials in which Black
+is bare are now all done: KQK, KRK, KBBK, KBNK. KNNK would be a fifth, and a
+dull one — two knights cannot force mate, so the whole table is drawn.
+
+Beyond that: five-man tables need a fifth placement dimension and, if two of
+the pieces are alike, the same unordered-tuple trick generalised; and for
+anything with pawns the *D*₄ reduction collapses to the single left–right
+mirror.

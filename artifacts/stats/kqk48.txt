@@ -1,0 +1,89 @@
+endgame               KQK  (white has a queen)
+board                 48 x 48
+king pairs (canonical)        661572
+entries per side          1524261888   (2.84 GiB in RAM for both sides)
+
+-- symmetry classes ------------------------------------------
+white to move   legal     1419191931   win     1419191931   draw            0
+black to move   legal     1521719376  loss     1516600300   draw      5119076
+                 mate           1246  stalemate      2749   queen en prise 5116327
+
+-- whole board (no symmetry reduction) -----------------------
+white to move   legal    11353470588   win    11353470588   draw            0
+black to move   legal    12173556104  loss    12132611776   draw     40944328
+                 mate           9964  stalemate     21992   queen en prise 40922336
+
+longest win  137 plies = mate in 69
+  example    wK=0,0 wQ=1,0 bK=25,23, white to move
+
+mate-in-N distribution (white to move, whole board)
+  mate in   1            491648  (61456 classes)
+  mate in   2            968284  (121058 classes)
+  mate in   3           1998576  (249844 classes)
+  mate in   4           4133708  (516757 classes)
+  mate in   5          10121540  (1265235 classes)
+  mate in   6          11180720  (1397632 classes)
+  mate in   7          25118248  (3139822 classes)
+  mate in   8          25738308  (3217371 classes)
+  mate in   9          43050336  (5381353 classes)
+  mate in  10          42437752  (5304818 classes)
+  mate in  11          59010164  (7376349 classes)
+  mate in  12          61263208  (7658016 classes)
+  mate in  13          78818248  (9852376 classes)
+  mate in  14          79358796  (9919979 classes)
+  mate in  15         101142720  (12642950 classes)
+  mate in  16         100228744  (12528736 classes)
+  mate in  17         122037988  (15254872 classes)
+  mate in  18         123157080  (15394790 classes)
+  mate in  19         145090224  (18136414 classes)
+  mate in  20         144309780  (18038888 classes)
+  mate in  21         169186320  (21148437 classes)
+  mate in  22         167436016  (20929677 classes)
+  mate in  23         190666484  (23833467 classes)
+  mate in  24         191433224  (23929336 classes)
+  mate in  25         213465128  (26683306 classes)
+  mate in  26         212427836  (26553669 classes)
+  mate in  27         236112256  (29514204 classes)
+  mate in  28         234366976  (29296067 classes)
+  mate in  29         254932612  (31866754 classes)
+  mate in  30         256202216  (32025476 classes)
+  mate in  31         273925240  (34240837 classes)
+  mate in  32         273821900  (34227939 classes)
+  mate in  33         291840296  (36480222 classes)
+  mate in  34         291111224  (36389106 classes)
+  mate in  35         304746180  (38093459 classes)
+  mate in  36         307531712  (38441667 classes)
+  mate in  37         316464344  (39558230 classes)
+  mate in  38         318580732  (39822793 classes)
+  mate in  39         326346728  (40793527 classes)
+  mate in  40         327837336  (40979866 classes)
+  mate in  41         330117628  (41264887 classes)
+  mate in  42         335561088  (41945331 classes)
+  mate in  43         331189992  (41398929 classes)
+  mate in  44         336863620  (42108142 classes)
+  mate in  45         329706392  (41213474 classes)
+  mate in  46         334785712  (41848397 classes)
+  mate in  47         320851712  (40106654 classes)
+  mate in  48         309339456  (38667607 classes)
+  mate in  49         285886504  (35735973 classes)
+  mate in  50         276492588  (34561719 classes)
+  mate in  51         240191440  (30024062 classes)
+  mate in  52         230410728  (28801460 classes)
+  mate in  53         196324988  (24540730 classes)
+  mate in  54         190077128  (23759736 classes)
+  mate in  55         156871448  (19609015 classes)
+  mate in  56         150878788  (18859922 classes)
+  mate in  57         122665960  (15333309 classes)
+  mate in  58         114919552  (14364999 classes)
+  mate in  59          90755956  (11344541 classes)
+  mate in  60          84641544  (10580232 classes)
+  mate in  61          63004472  (7875591 classes)
+  mate in  62          57318580  (7164848 classes)
+  mate in  63          39868808  (4983621 classes)
+  mate in  64          34349272  (4293674 classes)
+  mate in  65          22206484  (2775821 classes)
+  mate in  66          16807648  (2100963 classes)
+  mate in  67           8627704  (1078467 classes)
+  mate in  68           4175876  (521986 classes)
+  mate in  69            488688  (61086 classes)
+

@@ -1,0 +1,41 @@
+  n   king prs     entries/side        wtm win       wtm draw    draw%  deepest seconds  checks
+  3          5              420             64            416  86.667%     1 ply    0.00  
+      draws  loose 168 (40.4%)  guarded 248 (59.6%)  quiet 0 (0.0%)
+      wins   loose 0 (0.0%)  guarded 56 (87.5%)  quiet 8 (12.5%)
+      deepest win: wK=a1 wN1=b1 wN2=a3 wN3=c3 bK=c1
+  4         21            11760          26684           3004  10.119%    19 ply    0.01  
+      draws  loose 2680 (89.2%)  guarded 240 (8.0%)  quiet 84 (2.8%)
+      wins   loose 9288 (34.8%)  guarded 11184 (41.9%)  quiet 6212 (23.3%)
+      deepest win: wK=a1 wN1=c1 wN2=a4 wN3=c4 bK=c2
+  5         63           144900         464060          23216   4.764%    19 ply    0.03  
+      draws  loose 23040 (99.2%)  guarded 144 (0.6%)  quiet 32 (0.1%)
+      wins   loose 163124 (35.2%)  guarded 111992 (24.1%)  quiet 188944 (40.7%)
+      deepest win: wK=a1 wN1=b1 wN2=e2 wN3=e3 bK=e1
+  6        135           963900        4058156         121372   2.904%    31 ply    0.10  
+      draws  loose 120956 (99.7%)  guarded 144 (0.1%)  quiet 272 (0.2%)
+      wins   loose 1286604 (31.7%)  guarded 589064 (14.5%)  quiet 2182488 (53.8%)
+      deepest win: wK=a1 wN1=e1 wN2=a4 wN3=f6 bK=d2
+  7        270          4974480       23605308         454992   1.891%    35 ply    0.39  
+      draws  loose 445324 (97.9%)  guarded 128 (0.0%)  quiet 9540 (2.1%)
+      wins   loose 6499776 (27.5%)  guarded 2128168 (9.0%)  quiet 14977364 (63.4%)
+      deepest win: wK=a1 wN1=b1 wN2=a2 wN3=f6 bK=e5
+  8        462         19248768      104116284        1342972   1.273%    41 ply    1.19  
+      draws  loose 1274044 (94.9%)  guarded 128 (0.0%)  quiet 68800 (5.1%)
+      wins   loose 24589660 (23.6%)  guarded 6038088 (5.8%)  quiet 73488536 (70.6%)
+      deepest win: wK=a1 wN1=b1 wN2=g1 wN3=a2 bK=f2
+  9        770         65696400      375731528        3325180   0.877%    49 ply    4.16  
+      draws  loose 3071772 (92.4%)  guarded 128 (0.0%)  quiet 253280 (7.6%)
+      wins   loose 75967880 (20.2%)  guarded 14522472 (3.9%)  quiet 285241176 (75.9%)
+      deepest win: wK=a1 wN1=b1 wN2=h1 wN3=a2 bK=g2
+ 10       1170        189189000     1164446876        7223020   0.616%    57 ply   11.80  
+      draws  loose 6545668 (90.6%)  guarded 128 (0.0%)  quiet 677224 (9.4%)
+      wins   loose 202253316 (17.4%)  guarded 30997528 (2.7%)  quiet 931196032 (80.0%)
+      deepest win: wK=a1 wN1=b1 wN2=i1 wN3=a2 bK=h2
+ 11       1755        505404900     3202419096       14233372   0.442%    65 ply   34.50  
+      draws  loose 12721060 (89.4%)  guarded 128 (0.0%)  quiet 1512184 (10.6%)
+      wins   loose 480637240 (15.0%)  guarded 60455880 (1.9%)  quiet 2661325976 (83.1%)
+      deepest win: wK=a1 wN1=b1 wN2=j1 wN3=a2 bK=i2
+ 12       2475       1206176400     7998968276       26013604   0.324%    71 ply   92.49  
+      draws  loose 23020092 (88.5%)  guarded 128 (0.0%)  quiet 2993384 (11.5%)
+      wins   loose 1044388508 (13.1%)  guarded 109876488 (1.4%)  quiet 6844703280 (85.6%)
+      deepest win: wK=a1 wN1=b1 wN2=i1 wN3=a2 bK=h2

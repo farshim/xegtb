@@ -1,0 +1,38 @@
+generating 6x6 KNNNK: 135 king pairs, 963900 entries/side, 1.84 MiB RAM, 8 threads
+  sub-table 6x6 KNNK: 85050 entries/side
+  init: 135 king pairs, 639 mates, 0.02s
+  ply   1:         2531 wins   ply   2:          447 losses  (0.02s)
+  ply   3:         2002 wins   ply   4:         1192 losses  (0.02s)
+  ply   5:        10271 wins   ply   6:         3873 losses  (0.02s)
+  ply   7:        23135 wins   ply   8:        12813 losses  (0.02s)
+  ply   9:        49283 wins   ply  10:        22989 losses  (0.03s)
+  ply  11:        64028 wins   ply  12:        43257 losses  (0.03s)
+  ply  13:        88735 wins   ply  14:        70090 losses  (0.04s)
+  ply  15:        99498 wins   ply  16:       106216 losses  (0.05s)
+  ply  17:        95437 wins   ply  18:       128052 losses  (0.06s)
+  ply  19:        57091 wins   ply  20:        90865 losses  (0.07s)
+  ply  21:        13867 wins   ply  22:        24251 losses  (0.08s)
+  ply  23:         1474 wins   ply  24:         3187 losses  (0.08s)
+  ply  25:          131 wins   ply  26:          484 losses  (0.08s)
+  ply  27:           23 wins   ply  28:          108 losses  (0.08s)
+  ply  29:            1 wins   ply  30:            3 losses  (0.08s)
+  ply  31:            1 wins   ply  32:            5 losses  (0.08s)
+  solved in 0.08s  (phase A 0.03s, phase B 0.03s)
+        0.10 real         0.24 user         0.00 sys
+             4227072  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 982  page reclaims
+                   1  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+                 827  involuntary context switches
+          2289523923  instructions retired
+           799078752  cycles elapsed
+             3637560  peak memory footprint

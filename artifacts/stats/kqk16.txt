@@ -1,0 +1,42 @@
+endgame               KQK  (white has a queen)
+board                 16 x 16
+king pairs (canonical)          7980
+piece placements                 256   per king pair
+entries per side             2042880   (3.90 MiB in RAM for both sides)
+
+-- symmetry classes ------------------------------------------
+white to move   legal        1629075   win        1629075   draw            0
+black to move   legal        2014320  loss        1957148   draw        57172
+                 mate            158  stalemate       381   queen en prise     56791
+
+-- whole board (no symmetry reduction) -----------------------
+white to move   legal       13030780   win       13030780   draw            0
+black to move   legal       16108680  loss       15652032   draw       456648
+                 mate           1260  stalemate      3048   queen en prise    453600
+
+longest win  41 plies = mate in 21
+  example    wK=a1 wQ=b1 bK=j8, white to move
+
+mate-in-N distribution (white to move, whole board)
+  mate in   1             20160  (2520 classes)
+  mate in   2             40220  (5034 classes)
+  mate in   3             81072  (10140 classes)
+  mate in   4            187340  (23429 classes)
+  mate in   5            331332  (41427 classes)
+  mate in   6            424704  (53098 classes)
+  mate in   7            675272  (84418 classes)
+  mate in   8            722948  (90387 classes)
+  mate in   9            969256  (121170 classes)
+  mate in  10            971904  (121507 classes)
+  mate in  11           1154044  (144270 classes)
+  mate in  12           1172704  (146607 classes)
+  mate in  13           1259696  (157477 classes)
+  mate in  14           1243884  (155503 classes)
+  mate in  15           1228588  (153593 classes)
+  mate in  16            923384  (115438 classes)
+  mate in  17            744452  (93067 classes)
+  mate in  18            497088  (62143 classes)
+  mate in  19            272688  (34090 classes)
+  mate in  20            101236  (12656 classes)
+  mate in  21              8808  (1101 classes)
+

@@ -1,0 +1,269 @@
+% stepboard.sty -- every chess diagram in this document, steppable where there
+% is a line to step through.
+%
+%   \begin{stepboard}[<options>]{<n>}{<position>}
+%     <moves>
+%   \end{stepboard}
+%
+%   \sbpos[<options>]{<n>}{<position>}      -- the same thing with no moves
+%
+% <n>         board size; the board is n x n.
+% <position>  the men, space separated, upper case White and lower case Black:
+%               Kd1 Nb3 kb1
+% <moves>     the moves, comma or space separated, each a piece letter (its case
+%             gives the colour), an optional x, and the destination square:
+%               Nc5, ka1, Kc1, ka2, ..., Kxb1
+%             Anything after the square is kept and set in bold, so Nc5! works.
+%             Captures are detected from the board, so the x is optional.
+%             With no moves at all the diagram is an ordinary one: same badges,
+%             same geometry, no controls and nothing to click.
+%
+% Options (key=value):
+%   width    the widget's width            (default 62mm)
+%   board    the board's width             (default 4.2cm)
+%   minsq    the smallest a square may be  (default 3.3mm)
+%   height   the frame's fixed height      (default 58mm stepped, natural flat)
+%   intro    caption under the diagram, or on the opening position of a line
+%   coords   false to drop the file letters and rank numbers (default true)
+%   tomove   w, b or none, to say whose turn it is when there are no moves to
+%            read it from (default w).  A line takes it from its first move.
+%   under    board-body TeX drawn before the men: \cagebox, \qcut, \fray,
+%            \diag, \hl, \boxoff
+%   over     board-body TeX drawn after the men: \ring, \arw
+%   bg       the page colour behind the controls (default paper).  The greyed
+%            controls are painted over the live ones, so this has to match the
+%            page or a band appears behind the row on the first and last ply.
+%   variant  N for ordinary chess, C for capture the king (default N).  Shown as
+%            a badge at the right of the row under the board.
+%
+% `board=0pt,width=0pt' is the idiom for "as small as the floor allows": the
+% board comes out at exactly the minimum square size and the widget at exactly
+% the board, which is how a row of different board sizes is drawn to a common
+% square size rather than a common width.
+%
+% `board' is a request, not a promise.  A board is drawn at whichever is larger,
+% the width asked for or `minsq' times the board size, and the widget is widened
+% to hold it.  Without that floor a diagram keeps its column and the squares pay
+% for the board size: at 2.89cm a 15 x 15 board has 1.93mm squares, little more
+% than half the 3.33mm of an 8 x 8 at 2.66cm, and the men stop being legible at
+% exactly the sizes the document argues about.  So a row of boards of different
+% sizes grows across the page rather than shrinking into itself, and the call
+% site has to leave it room.
+%
+% The side to move is shown at the left of that row, by the usual convention: a
+% hollow disc for White, a filled one for Black.  In a line it is derived from
+% the moves, and it disappears once a king has been taken and there is no side
+% to move any more.
+%
+% How the stepping works, and why it is built this way.  Each ply is an
+% optional-content layer and the layers are stacked in place; the controls carry
+% SetOCGState links that turn one off and the next on.  There is no JavaScript,
+% so it does not depend on Acrobat.
+%
+% Optional content is drawn unless something hides it, so a viewer that cannot
+% resolve the layers -- one that does not implement optional content, or any
+% viewer at all reading a PDF whose build stopped before ocgx2's page records
+% converged -- paints every ply of a line on top of every other, which is a
+% scramble and not a diagram.  Two things make that case degrade to the opening
+% position instead.  Each ply is opaque over the ones beneath it: the board is
+% a filled square, and the caption and the side-to-move disc are set on boxes
+% of the page colour.  And the stack is drawn backwards, the last ply first and
+% ply 0 last, so ply 0 is the one on top.  The controls then do nothing, which
+% is the documented fallback.
+%
+% Four details are load-bearing, each of them a bug that had to be found:
+%
+%   1. The board is never a click target.  A viewer decorates whatever region
+%      carries a link, and several tint it on hover, which over a whole board
+%      reads as the picture lighting up.  Only the controls are links.
+%
+%   2. The control row is drawn ONCE, outside every layer, and each layer
+%      contributes only an invisible \phantom of the same size carrying the
+%      link.  Drawn inside the layers it put one copy of the glyphs per ply at
+%      the same coordinates, and a viewer asked for the text under the pointer
+%      returned all of them at once.
+%
+%   3. Each stack sits in an \mbox.  Inside a \centering-ed minipage TeX will
+%      otherwise break lines between the zero-width layers and set them one
+%      under the other instead of on top of each other.
+%
+%   4. The glyphs are Unicode from the chess font, not math symbols.
+%      \triangleleft and friends draw correctly but carry no usable ToUnicode,
+%      so they come out of the text layer as "/" and ".".  Fast-backward has no
+%      code point the font covers (U+23EA is absent), so it is two hollow
+%      triangles kerned together to match the single ones either side.
+%
+% Requires: lualatex, ocgx2, and the board macros \bdw, \coordsn, \pw, \pbx,
+% \ring, the \glyph... piece macros and the ink/paper colours.
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{stepboard}[2026/09/12 v2.0 steppable chess diagrams]
+\RequirePackage{ocgx2}
+\RequirePackage{keyval}
+\RequirePackage{xcolor}
+
+% Checked at \begin{document}, not here: the board macros are usually defined
+% further down the same preamble that loads this package.
+\AtBeginDocument{\@ifundefined{bdw}{\PackageError{stepboard}%
+  {The board macros are missing}%
+  {stepboard needs \string\bdw, \string\coordsn, \string\pw, \string\pbx and
+   \string\ring, as defined in endgames-preamble.tex.}}{}}
+
+\newsavebox{\sbctlbox}
+% A stepped diagram's captions are stacked one on top of another, so they have
+% to occupy one box of one size.  Set at their natural heights an intro that
+% wraps to three lines and a move caption of one would leave the stack as tall
+% as whichever was drawn last, and the long one would spill over the text below;
+% set in \makebox, as they were, they do not wrap at all and a long intro runs
+% out past both margins and over its neighbour.  So every caption is measured
+% first into \sbcapbox, \sbcapmax keeps the tallest in \sbcapht, and each is
+% then set into a parbox of that height: they wrap, they align, and stepping
+% moves nothing.
+\newsavebox{\sbcapbox}
+\newlength{\sbcapht}
+\newlength{\sb@tmp}
+\newlength{\sbcapha}
+\newcommand{\sbcapreset}{\setlength{\sbcapht}{0pt}\setlength{\sbcapha}{0pt}}
+% Both the total and the part above the baseline.  Forcing the total alone is
+% not enough: \parbox[t] puts the baseline on the first line, so a ply whose
+% first line is the taller one stands higher than the rest, and the cover ply 0
+% paints would leave its ascenders showing as a stroke above the caption.
+\newcommand{\sbcapmax}{%
+  \ifdim\dimexpr\ht\sbcapbox+\dp\sbcapbox\relax>\sbcapht
+    \setlength{\sbcapht}{\dimexpr\ht\sbcapbox+\dp\sbcapbox\relax}%
+  \fi
+  \ifdim\ht\sbcapbox>\sbcapha \setlength{\sbcapha}{\ht\sbcapbox}\fi}
+\newcommand{\sbcaptext}[1]{\centering\scriptsize\color{inksoft}#1\par}
+\newcommand{\sbcapmeasure}[1]{%
+  \sbox{\sbcapbox}{\parbox[t]{\sbwidth}{\sbcaptext{#1}}}\sbcapmax}
+% #1 is the page colour.  The caption is painted on an opaque box of its own,
+% because the captions are stacked and a viewer that cannot resolve the layers
+% draws all of them: see the note on drawing order below.
+% The cover spans exactly the band every caption can reach: from the deepest
+% descender, \sbcapht-\sbcapha below the baseline, up to the tallest ascender
+% at \sbcapha, with a quarter point either side for rounding.
+\newcommand{\sbcap}[2]{%
+  \mbox{\rlap{\textcolor{#1}{%
+      \rule[-\dimexpr\sbcapht-\sbcapha+0.25pt\relax]{\sbwidth}%
+            {\dimexpr\sbcapht+0.5pt\relax}}}%
+    \parbox[t][\sbcapht][t]{\sbwidth}{\sbcaptext{#2}}}}
+% The side-to-move disc, likewise, on a box the width of the wider of the two
+% discs so that one ply's marker covers another's exactly.
+\newlength{\sbdiscw}
+\newcommand{\sbmark}[2]{%
+  {\settowidth{\sbdiscw}{{\scriptsize\sbbtm}}%
+   \settowidth{\sb@tmp}{{\scriptsize\sbwtm}}%
+   \ifdim\sb@tmp>\sbdiscw \setlength{\sbdiscw}{\sb@tmp}\fi
+   \setlength{\fboxsep}{0pt}\colorbox{#1}{\makebox[\sbdiscw][l]{#2}}}}
+\newcounter{sb@id}
+\newlength{\sbwidth}
+\newlength{\sbboardw}
+\newcommand{\sbsetwidth}[1]{\setlength{\sbwidth}{#1}}
+\newcommand{\sbsetboard}[1]{\setlength{\sbboardw}{#1}}
+% The side-to-move disc and the variant badge sit at the board's edges, not the
+% widget's, so they read as belonging to the diagram rather than floating.
+\providecommand{\sbatleft}[1]{\makebox[\sbwidth][c]{\makebox[\sbboardw][l]{#1}}}
+\providecommand{\sbatright}[1]{\makebox[\sbwidth][c]{\makebox[\sbboardw][r]{#1}}}
+
+% The three controls, and the row that holds them.  Both the visible row and
+% every invisible phantom go through \sbrow, so they cannot drift apart.
+\providecommand{\sbsym}[1]{{\chessfont\char"#1\relax}}
+\providecommand{\sbback}{\sbsym{25C1}}
+\providecommand{\sbnext}{\sbsym{25B7}}
+\providecommand{\sbstart}{{\chessfont\char"25C1\kern-0.28em\char"25C1}}
+\providecommand{\sbrow}[3]{\makebox[\sbwidth][c]{{\scriptsize#1\quad #2\quad #3}}}
+
+% Side to move, the way a diagram in a chess book shows it.
+\providecommand{\sbwtm}{\sbsym{25CB}}
+\providecommand{\sbbtm}{\sbsym{25CF}}
+% Which rules are in force: N ordinary, C capture the king.
+\providecommand{\sbbadge}[1]{{\setlength{\fboxsep}{1.1pt}\setlength{\fboxrule}{0.4pt}%
+  \color{inksoft!55}\fbox{\scriptsize\textcolor{inksoft}{#1}}}}
+
+% stepboard.lua sits beside this file.  kpse finds it when the build runs in
+% that directory; the fallbacks cover a build launched from the parent, which is
+% where the repository's Makefile is.  kpse.find_file returns nil on a miss, and
+% a nil would end an ipairs walk at the first slot, so the list is built with
+% table.insert rather than as a literal.  No "%" comments and no "#" inside the
+% \directlua argument: TeX would eat the first and choke on the second.
+\directlua{
+  local candidates = {}
+  local found = kpse.find_file("stepboard.lua")
+  if found then table.insert(candidates, found) end
+  table.insert(candidates, "stepboard.lua")
+  table.insert(candidates, "doc/stepboard.lua")
+  for _, path in ipairs(candidates) do
+    local chunk = loadfile(path)
+    if chunk then stepboard = chunk() break end
+  end
+  if not stepboard then
+    tex.error("stepboard: cannot find stepboard.lua",
+              { "It must sit beside stepboard.sty.",
+                "Build from doc/, or run make there." })
+  end
+}
+
+\define@key{sb}{width}{\def\sb@width{#1}}      % the widget's width
+\define@key{sb}{board}{\def\sb@board{#1}}      % the board's width
+\define@key{sb}{minsq}{\def\sb@minsq{#1}}      % the smallest a square may be
+\define@key{sb}{height}{\def\sb@height{#1}}    % fixed, so stepping shifts nothing
+\define@key{sb}{intro}{\def\sb@intro{#1}}      % caption
+\define@key{sb}{bg}{\def\sb@bg{#1}}            % page colour behind the controls
+\define@key{sb}{variant}{\def\sb@variant{#1}}  % N ordinary chess, C capture the king
+\define@key{sb}{tomove}{\def\sb@tomove{#1}}    % w, b or none, for a diagram with no line
+\define@key{sb}{under}{\def\sb@under{#1}}      % drawn before the men
+\define@key{sb}{over}{\def\sb@over{#1}}        % drawn after them
+\define@key{sb}{coords}{\def\sb@coords{#1}}    % false to drop the coordinates
+
+% Defaults that hold for a whole document, so that a section's diagrams can be
+% switched between the two rule sets in one place.
+\newcommand{\sbdefaults}[1]{\setkeys{sb@doc}{#1}}
+\def\sb@dwidth{62mm}\def\sb@dboard{4.2cm}\def\sb@dheight{}\def\sb@dvariant{N}
+\def\sb@dbg{paper}\def\sb@dcoords{true}\def\sb@dminsq{3.3mm}
+\define@key{sb@doc}{width}{\def\sb@dwidth{#1}}
+\define@key{sb@doc}{board}{\def\sb@dboard{#1}}
+\define@key{sb@doc}{minsq}{\def\sb@dminsq{#1}}
+\define@key{sb@doc}{height}{\def\sb@dheight{#1}}
+\define@key{sb@doc}{variant}{\def\sb@dvariant{#1}}
+\define@key{sb@doc}{bg}{\def\sb@dbg{#1}}
+\define@key{sb@doc}{coords}{\def\sb@dcoords{#1}}
+
+% Apply the floor.  #1 is the board size, so #1\sb@tmp is the width the board
+% needs at the minimum square size; the board takes whichever is larger, and the
+% widget is widened to hold the board if it has grown past it.  Both are then
+% frozen as explicit dimensions, because what follows hands them to Lua as text
+% and \linewidth means something else inside the minipage Lua opens.
+\newcommand{\sb@fit}[1]{%
+  \setlength{\sbboardw}{\sb@board}%
+  \setlength{\sb@tmp}{\sb@minsq}%
+  \setlength{\sb@tmp}{#1\sb@tmp}%
+  \ifdim\sb@tmp>\sbboardw \setlength{\sbboardw}{\sb@tmp}\fi
+  \setlength{\sbwidth}{\sb@width}%
+  \ifdim\sbboardw>\sbwidth \setlength{\sbwidth}{\sbboardw}\fi
+  \edef\sb@board{\the\sbboardw}\edef\sb@width{\the\sbwidth}}
+
+\newcommand{\sb@emit}[4]{%
+  \let\sb@width\sb@dwidth \let\sb@board\sb@dboard \let\sb@height\sb@dheight
+  \let\sb@variant\sb@dvariant \let\sb@bg\sb@dbg \let\sb@coords\sb@dcoords
+  \let\sb@minsq\sb@dminsq
+  \def\sb@intro{}\def\sb@tomove{}\def\sb@under{}\def\sb@over{}%
+  \setkeys{sb}{#1}%
+  \sb@fit{#2}%
+  \stepcounter{sb@id}%
+  \directlua{stepboard.emit(\arabic{sb@id}, #2,
+    "\luaescapestring{\detokenize{#3}}",
+    "\luaescapestring{\detokenize{#4}}",
+    "\luaescapestring{\sb@width}",
+    "\luaescapestring{\sb@board}",
+    "\luaescapestring{\sb@height}",
+    "\luaescapestring{\detokenize\expandafter{\sb@intro}}",
+    "\luaescapestring{\sb@bg}",
+    "\luaescapestring{\sb@variant}",
+    "\luaescapestring{\sb@tomove}",
+    "\luaescapestring{\detokenize\expandafter{\sb@under}}",
+    "\luaescapestring{\detokenize\expandafter{\sb@over}}",
+    "\luaescapestring{\sb@coords}")}%
+}
+
+\NewDocumentEnvironment{stepboard}{O{} m m +b}{\sb@emit{#1}{#2}{#3}{#4}}{}
+\NewDocumentCommand{\sbpos}{O{} m m}{\sb@emit{#1}{#2}{#3}{}}
+\endinput

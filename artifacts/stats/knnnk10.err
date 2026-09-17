@@ -1,0 +1,51 @@
+generating 10x10 KNNNK: 1170 king pairs, 189189000 entries/side, 360.85 MiB RAM, 8 threads
+  sub-table 10x10 KNNK: 5791500 entries/side
+  init: 1170 king pairs, 2735 mates, 2.19s
+  ply   1:        13363 wins   ply   2:          921 losses  (2.19s)
+  ply   3:         4648 wins   ply   4:         1884 losses  (2.19s)
+  ply   5:        21783 wins   ply   6:         7168 losses  (2.20s)
+  ply   7:        66799 wins   ply   8:        27250 losses  (2.20s)
+  ply   9:       190482 wins   ply  10:        56367 losses  (2.22s)
+  ply  11:       343866 wins   ply  12:       127923 losses  (2.23s)
+  ply  13:       598106 wins   ply  14:       209891 losses  (2.26s)
+  ply  15:       893066 wins   ply  16:       356442 losses  (2.30s)
+  ply  17:      1299208 wins   ply  18:       504753 losses  (2.36s)
+  ply  19:      1685674 wins   ply  20:       714883 losses  (2.44s)
+  ply  21:      2170291 wins   ply  22:       966251 losses  (2.55s)
+  ply  23:      2724827 wins   ply  24:      1345673 losses  (2.70s)
+  ply  25:      3483526 wins   ply  26:      1939533 losses  (3.00s)
+  ply  27:      4600493 wins   ply  28:      2822227 losses  (3.31s)
+  ply  29:      6139862 wins   ply  30:      4141282 losses  (3.71s)
+  ply  31:      8108702 wins   ply  32:      6046679 losses  (4.31s)
+  ply  33:     10650792 wins   ply  34:      8757102 losses  (5.07s)
+  ply  35:     13796792 wins   ply  36:     12539978 losses  (5.89s)
+  ply  37:     17325301 wins   ply  38:     17393469 losses  (7.01s)
+  ply  39:     20185058 wins   ply  40:     22125300 losses  (8.21s)
+  ply  41:     20636639 wins   ply  42:     24076127 losses  (9.89s)
+  ply  43:     16860786 wins   ply  44:     20454814 losses  (11.16s)
+  ply  45:      9627188 wins   ply  46:     12366766 losses  (12.12s)
+  ply  47:      3374941 wins   ply  48:      4971124 losses  (12.64s)
+  ply  49:       665832 wins   ply  50:      1297649 losses  (12.92s)
+  ply  51:        85852 wins   ply  52:       231310 losses  (12.99s)
+  ply  53:         8028 wins   ply  54:        26269 losses  (13.01s)
+  ply  55:          496 wins   ply  56:         1727 losses  (13.02s)
+  ply  57:           10 wins   ply  58:           30 losses  (13.03s)
+  solved in 13.06s  (phase A 4.86s, phase B 5.98s)
+       13.94 real        76.20 user         0.55 sys
+           396427264  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               33727  page reclaims
+                   2  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   2  voluntary context switches
+               91574  involuntary context switches
+        661780094307  instructions retired
+        216183445505  cycles elapsed
+           396444272  peak memory footprint

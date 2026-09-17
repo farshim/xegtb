@@ -1,0 +1,26 @@
+endgame               KQKK, capture rules  (every king is an ordinary
+                      man; you win by capturing all of the opponent's;
+                      no check and no mate)
+board                 12 x 12
+king triples                  183117   (kings may stand next to each other)
+entries per side            26368848   (102.02 MiB in RAM, all four tables)
+
+-- the sub-endgames it converts into -------------------------
+K vs K       19580 of 20592 placements drawn  (the rest: the kings already touch)
+K vs K + K   black to move: 1462032 of 1462032 are black wins -- every one, deepest 81 plies
+             white to move: black wins 1326512, draw 135520 (White takes a king
+                            and reaches bare kings), white wins 0
+K + Q vs K   white to move: 2924064 of 2924064 are white wins -- every one, deepest 29 plies
+             black to move: white wins 2646600, draw 133760 (...KxQ), black wins 143704 (...KxK)
+
+-- whole board (no symmetry reduction) -----------------------
+white to move   White wins    181847476 ( 88.2%)   draw     24232428 ( 11.8%)   BLACK wins      66608 (0.0%)
+black to move   BLACK wins     37350968 ( 18.1%)   draw     52389680 ( 25.4%)   White wins  116405864 (56.5%)
+
+-- quiet placements only: nothing hanging ------------------
+white to move   White wins     86069448 ( 81.8%)   draw     19129672 ( 18.2%)   BLACK wins         64 (0.0%)
+black to move   BLACK wins        16136 (  0.0%)   draw     34506284 ( 32.8%)   White wins   70676764 (67.2%)
+
+deepest white win 37 plies = 19 moves   at wK=a1 wQ=a12 bK=c1 bK=j8, white to move
+deepest black win 83 plies = 42 moves   at wK=c1 wQ=l1 bK=a1 bK=k1, black to move
+

@@ -1,0 +1,35 @@
+endgame               KQKK  (white has a queen, black has two kings)
+rules                 strict -- black may not leave either king attacked
+board                 7 x 7
+king triples (canon.)           5282
+queen squares                     49   per king triple
+entries per side              258818   (505.50 KiB in RAM for both sides)
+
+-- symmetry classes ------------------------------------------
+white to move   legal          86310   win          86310   draw            0
+black to move   legal         239227  loss         179341   draw        59886
+           double mate          13739  stalemate      4734   queen en prise    55152
+     of those stalemates,     4625 have one king mated and the other free
+
+-- whole board (no symmetry reduction) -----------------------
+white to move   legal         688376   win         688376   draw            0
+black to move   legal        1909920  loss        1431728   draw       478192
+           double mate         109072  stalemate     37592   queen en prise   440600
+     of those stalemates,    36736 have one king mated and the other free
+
+white to move: 100.00% won, 0.00% drawn
+longest win  11 plies = mate in 6
+  example    wK=a1 wQ=c7 bK=e3 bK=f3, white to move
+
+mate-in-N distribution (white to move, whole board)
+  mate in   1            381908  (47924 classes)
+  mate in   2            187824  (23509 classes)
+  mate in   3             80384  (10080 classes)
+  mate in   4             31524  (3953 classes)
+  mate in   5              6432  (806 classes)
+  mate in   6               304  (38 classes)
+
+      109072 mating placements: kings side by side 1.4%, both on the rim 26.7%,
+      neither on the rim 20.3%, one in a corner 19.4%
+      the white king's part: defends the queen 19.7%, stands beside a flight square 46.5%,
+      neither -- the queen mates both kings alone -- 46.6%

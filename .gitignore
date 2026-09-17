@@ -1,0 +1,22 @@
+# Build output
+*.o
+egtb
+# the endgame-named symlinks to the one binary
+/kqk
+/krk
+/kbbk
+/kbnk
+
+# Generated tables: 1.3 GB, and regenerable from the solver
+artifacts/tables/
+
+# LaTeX build products
+doc/*.aux
+doc/*.log
+doc/*.out
+doc/*.toc
+doc/*.fls
+doc/*.fdb_latexmk
+doc/*.synctex.gz
+
+.DS_Store

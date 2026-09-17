@@ -1,0 +1,43 @@
+generating 8x8 KNNNK: 462 king pairs, 19248768 entries/side, 36.71 MiB RAM, 8 threads
+  sub-table 8x8 KNNK: 931392 entries/side
+  init: 462 king pairs, 1483 mates, 0.28s
+  ply   1:         6728 wins   ply   2:          663 losses  (0.28s)
+  ply   3:         3206 wins   ply   4:         1506 losses  (0.28s)
+  ply   5:        16413 wins   ply   6:         5888 losses  (0.28s)
+  ply   7:        49099 wins   ply   8:        22573 losses  (0.28s)
+  ply   9:       134150 wins   ply  10:        44710 losses  (0.29s)
+  ply  11:       215434 wins   ply  12:        94306 losses  (0.30s)
+  ply  13:       347713 wins   ply  14:       147519 losses  (0.31s)
+  ply  15:       482715 wins   ply  16:       235649 losses  (0.34s)
+  ply  17:       665108 wins   ply  18:       351085 losses  (0.38s)
+  ply  19:       862876 wins   ply  20:       557473 losses  (0.45s)
+  ply  21:      1161522 wins   ply  22:       869655 losses  (0.62s)
+  ply  23:      1517257 wins   ply  24:      1319327 losses  (0.76s)
+  ply  25:      1878588 wins   ply  26:      1889125 losses  (0.90s)
+  ply  27:      2107024 wins   ply  28:      2434114 losses  (1.05s)
+  ply  29:      1930901 wins   ply  30:      2450792 losses  (1.18s)
+  ply  31:      1182999 wins   ply  32:      1611853 losses  (1.30s)
+  ply  33:       384326 wins   ply  34:       604232 losses  (1.36s)
+  ply  35:        62069 wins   ply  36:       138342 losses  (1.38s)
+  ply  37:         7317 wins   ply  38:        23950 losses  (1.39s)
+  ply  39:          674 wins   ply  40:         2326 losses  (1.39s)
+  ply  41:           43 wins   ply  42:          163 losses  (1.39s)
+  solved in 1.39s  (phase A 0.46s, phase B 0.65s)
+        1.49 real         7.00 user         0.04 sys
+            43646976  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                3529  page reclaims
+                   1  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+                6963  involuntary context switches
+         58629985951  instructions retired
+         20069494012  cycles elapsed
+            43106688  peak memory footprint

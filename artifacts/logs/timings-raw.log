@@ -1,0 +1,5 @@
+n=8 longest win  19 plies = mate in 10 generated in 0.00 s (15.7 M entries/s)              1736704  maximum resident set size 
+n=16 longest win  41 plies = mate in 21 generated in 0.07 s (60.6 M entries/s)              6193152  maximum resident set size 
+n=24 longest win  65 plies = mate in 33 generated in 0.63 s (75.4 M entries/s)             50642944  maximum resident set size 
+n=32 longest win  89 plies = mate in 45 generated in 3.63 s (73.4 M entries/s)            272613376  maximum resident set size 
+n=40 longest win  113 plies = mate in 57 generated in 11.79 s (86.5 M entries/s)           1031110656  maximum resident set size 

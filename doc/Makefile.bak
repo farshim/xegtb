@@ -1,0 +1,18 @@
+# Build the illustrated summary.  lualatex is required: the chess pieces are
+# Unicode glyphs from a system font, which pdflatex cannot reach.
+PDF := endgames.pdf
+SRC := endgames.tex endgames-preamble.tex stepboard.sty stepboard.lua
+
+all: $(PDF)
+
+$(PDF): $(SRC)
+	lualatex -interaction=nonstopmode $< >/dev/null
+	lualatex -interaction=nonstopmode $< >/dev/null
+
+clean:
+	rm -f *.aux *.log *.out *.toc
+
+distclean: clean
+	rm -f $(PDF)
+
+.PHONY: all clean distclean

@@ -1,0 +1,42 @@
+endgame               KBBK  (white has two bishops)
+board                 9 x 9
+king pairs (canonical)           770
+piece placements                3240   per king pair
+entries per side             2494800   (4.76 MiB in RAM for both sides)
+
+-- symmetry classes ------------------------------------------
+white to move   legal        1753442   win         866230   draw       887212
+black to move   legal        2287698  loss         977541   draw      1310157
+                 mate            277  stalemate      1921   bishop en prise   312273
+
+-- whole board (no symmetry reduction) -----------------------
+white to move   legal       14017672   win        6928544   draw      7089128
+black to move   legal       18288816  loss        7819548   draw     10469268
+                 mate           2216  stalemate     15284   bishop en prise  2496676
+
+longest win  41 plies = mate in 21
+  example    wK=a1 wB1=e1 wB2=a4 bK=e2, white to move
+
+mate-in-N distribution (white to move, whole board)
+  mate in   1             10692  (1338 classes)
+  mate in   2              3944  (493 classes)
+  mate in   3             24936  (3117 classes)
+  mate in   4             29456  (3682 classes)
+  mate in   5             50904  (6363 classes)
+  mate in   6             57480  (7185 classes)
+  mate in   7             84696  (10587 classes)
+  mate in   8            123664  (15458 classes)
+  mate in   9            183912  (22994 classes)
+  mate in  10            272172  (34025 classes)
+  mate in  11            386108  (48271 classes)
+  mate in  12            504440  (63064 classes)
+  mate in  13            675020  (84389 classes)
+  mate in  14            785524  (98201 classes)
+  mate in  15            861740  (107732 classes)
+  mate in  16            866160  (108291 classes)
+  mate in  17            801168  (100168 classes)
+  mate in  18            674884  (84381 classes)
+  mate in  19            428252  (53553 classes)
+  mate in  20            100264  (12547 classes)
+  mate in  21              3128  (391 classes)
+

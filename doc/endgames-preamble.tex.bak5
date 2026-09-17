@@ -1,0 +1,173 @@
+% ---------------------------------------------------------------------------
+% Shared preamble: palette, chess-diagram macros, callout boxes.
+% Compile the main file with lualatex (needed for the Unicode chess glyphs).
+% ---------------------------------------------------------------------------
+\usepackage[a4paper,margin=20mm,top=22mm,bottom=22mm]{geometry}
+\usepackage{fontspec}
+\usepackage{microtype}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{booktabs}
+\usepackage{tcolorbox}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{titlesec}
+\usepackage{needspace}
+\usepackage[hidelinks]{hyperref}
+% stepboard gives the document its one steppable diagram
+% (\S\ref{sub:kn-longest}): the plies are optional-content layers stacked in
+% place and a click swaps which one is shown.  It loads ocgx2, and must come
+% after hyperref.  No JavaScript is involved, so a viewer that ignores optional
+% content simply shows the opening position.
+\usepackage{stepboard}
+\pgfplotsset{compat=1.18}
+\usetikzlibrary{calc,positioning,decorations.pathreplacing,arrows.meta}
+\tcbuselibrary{skins,breakable}
+
+% ---- palette --------------------------------------------------------------
+\definecolor{ink}      {HTML}{16202A}
+\definecolor{inksoft}  {HTML}{50606E}
+\definecolor{paper}    {HTML}{FBF8F3}
+\definecolor{kqk}      {HTML}{6C3FA8}   % queen  -- violet
+\definecolor{krk}      {HTML}{0E7C7B}   % rook   -- teal
+\definecolor{kbbk}     {HTML}{D67200}   % bishops-- amber
+\definecolor{kbnk}     {HTML}{C1264B}   % B+N    -- crimson
+\definecolor{kqkr}     {HTML}{2F6B3A}   % Q v R  -- forest; the armed defender
+\definecolor{kqkk}     {HTML}{17539E}   % Q v KK -- blue; the doubled defender
+\definecolor{knnnk}    {HTML}{B5179E}   % 3N v K -- magenta; the knights
+\definecolor{knnk}     {HTML}{7A2E93}   % 2N v K -- plum; the table beneath it
+\definecolor{kings}    {HTML}{A5452A}   % KKK v KK -- brick; nothing but kings
+% Board and men follow the Lichess default: the brown board, white men white
+% and black men black.  Nothing about a diagram should have to be decoded --
+% colour means side, and only side.
+\definecolor{sqlight}  {HTML}{F0D9B5}
+\definecolor{sqdark}   {HTML}{B58863}
+\definecolor{manwhite} {HTML}{FFFFFF}
+\definecolor{manblack} {HTML}{262421}
+\definecolor{arrowW}   {HTML}{15803D}   % White's move -- green, as Lichess draws it
+\definecolor{arrowB}   {HTML}{B4232C}   % Black's move
+\definecolor{hlwin}    {HTML}{86C08A}
+\definecolor{hldraw}   {HTML}{E4A0A0}
+\definecolor{hlmark}   {HTML}{F2D061}
+
+\newfontfamily\chessfont{Apple Symbols}
+
+% ---- headings -------------------------------------------------------------
+\titleformat{\section}{\Large\bfseries\color{ink}}{\thesection}{0.6em}{}[{\color{ink!25}\titlerule[1pt]}]
+\titleformat{\subsection}{\large\bfseries\color{inksoft}}{\thesubsection}{0.6em}{}
+% Level three sits under level two, so it must not weigh more: same colour,
+% one size down.  Without this it inherits the default black and reads as the
+% most prominent heading on the page.
+\titleformat{\subsubsection}{\normalsize\bfseries\color{inksoft}}{\thesubsubsection}{0.6em}{}
+
+
+% \S\ref{sec:kings} and \S\ref{sec:rules} go one level deeper than the rest, so
+% level four is numbered too -- otherwise a \ref to one of those blocks would
+% silently resolve to its parent.  Run-in, so it never reads as a heading.
+\setcounter{secnumdepth}{4}
+\titleformat{\paragraph}[runin]{\normalsize\bfseries\color{inksoft}}{\theparagraph}{0.5em}{}[.]
+\titlespacing*{\paragraph}{0pt}{1.4ex plus 1ex minus .2ex}{0.8em}
+% ---- chess diagram --------------------------------------------------------
+% Squares are addressed by 0-based (file, rank).  \bd{<sq size in cm>}{<n>}{body}
+\newcommand{\glyphK}{♔}\newcommand{\glyphQ}{♕}\newcommand{\glyphR}{♖}
+\newcommand{\glyphB}{♗}\newcommand{\glyphN}{♘}\newcommand{\glyphP}{♙}
+% Lower case is Black, as \glyphk already is.  The stalemate classification in
+% \S8 needs a black rook, bishop and pawn; nothing else in the document does.
+\newcommand{\glyphk}{♚}\newcommand{\glyphq}{♛}\newcommand{\glyphr}{♜}
+\newcommand{\glyphb}{♝}\newcommand{\glyphn}{♞}\newcommand{\glyphp}{♟}
+
+\newlength{\sqsz}\newlength{\glyphsz}
+
+% \bd{<square size>}{<n>}{body}   -- fixed square size, board grows with n
+% \bdw{<total width>}{<n>}{body}  -- fixed total width, squares shrink with n
+\newcommand{\bd}[3]{\setlength{\sqsz}{#1}\bdX{#2}{#3}}
+\newcommand{\bdw}[3]{\setlength{\sqsz}{\dimexpr#1/#2\relax}\bdX{#2}{#3}}
+\newcommand{\bdX}[2]{%
+  \setlength{\glyphsz}{0.78\sqsz}%
+  \begin{tikzpicture}[x=\sqsz,y=\sqsz,every node/.style={inner sep=0pt}]
+    \foreach \f in {0,...,\the\numexpr#1-1\relax}{%
+      \foreach \r in {0,...,\the\numexpr#1-1\relax}{%
+        \pgfmathparse{int(mod(\f+\r,2))}%
+        \ifnum\pgfmathresult=0 \fill[sqdark] (\f,\r) rectangle ++(1,1);
+        \else \fill[sqlight] (\f,\r) rectangle ++(1,1);\fi}}%
+    #2
+    \draw[ink!70,line width=0.7pt] (0,0) rectangle (#1,#1);
+  \end{tikzpicture}}
+
+% Pieces sit on a disc, so they stay visible even when the squares are tiny --
+% at n = 60 a square is under a millimetre.  The disc carries the piece's
+% colour and the rim contrasts with it, so a man reads as white or black at any
+% size and on either shade of square.
+\newcommand{\disc}[4]{%
+  \fill[#3] (#1+0.5,#2+0.5) circle (0.40);
+  \draw[#4,line width=0.4pt] (#1+0.5,#2+0.5) circle (0.40);}
+\newcommand{\pw}[3]{\disc{#1}{#2}{manwhite}{manblack!75}%
+  \node at (#1+0.5,#2+0.5)
+    {\chessfont\fontsize{\glyphsz}{\glyphsz}\selectfont\textcolor{manblack}{#3}};}
+% \pbx puts any black man on the board; \pb is the king, which is all four of
+% the bare-king endgames ever need.
+\newcommand{\pbx}[3]{\disc{#1}{#2}{manblack}{manwhite!85}%
+  \node at (#1+0.5,#2+0.5)
+    {\chessfont\fontsize{\glyphsz}{\glyphsz}\selectfont\textcolor{manwhite}{#3}};}
+\newcommand{\pb}[2]{\pbx{#1}{#2}{\glyphk}}
+% \coords -- file letters and rank numbers around an 8x8 board.  Called from
+% inside a board body, for the diagrams a reader has to follow square by square
+% rather than take in at a glance.
+\newcommand{\coords}{%
+  \foreach \f/\l in {0/a,1/b,2/c,3/d,4/e,5/f,6/g,7/h}{%
+    \node[below=0.5pt,font=\tiny,color=inksoft] at (\f+0.5,0) {\l};}%
+  \foreach \r in {0,...,7}{%
+    \node[left=1pt,font=\tiny,color=inksoft] at (0,\r+0.5)
+      {\the\numexpr\r+1\relax};}}
+
+% \coordsn{<n>} -- the same for a board of any size, which \S\ref{sec:kings} needs:
+% its diagrams run from 3x3 up to 10x10 and the reader has to name squares on
+% all of them.  The file letter comes from \alph via a counter, since \foreach
+% hands us the file as a number.
+\newcounter{coordfile}
+\newcommand{\coordn}[1]{\setcounter{coordfile}{\numexpr#1+1\relax}\alph{coordfile}}
+\newcommand{\coordsn}[1]{%
+  \foreach \f in {0,...,\the\numexpr#1-1\relax}{%
+    \node[below=0.5pt,font=\tiny,color=inksoft] at (\f+0.5,0) {\coordn{\f}};}%
+  \foreach \r in {0,...,\the\numexpr#1-1\relax}{%
+    \node[left=1pt,font=\tiny,color=inksoft] at (0,\r+0.5)
+      {\the\numexpr\r+1\relax};}}
+
+% \arw{f0}{r0}{f1}{r1}{colour}{number} -- a numbered move arrow.  Drawn over
+% the men rather than under them, the way a board site draws them, because a
+% king move is one square long and an arrow shortened clear of both discs would
+% have nothing left of it.  The number sits at the midpoint, so a chain of
+% moves through one square stays readable.
+\newcommand{\arw}[6]{%
+  \draw[#5,opacity=0.82,line width=1.3pt,-{Stealth[length=2.4mm,width=2mm]},
+        shorten >=1.2pt,shorten <=1.2pt] (#1+0.5,#2+0.5) -- (#3+0.5,#4+0.5);
+  \node[circle,fill=#5,text=white,inner sep=0pt,minimum size=3.1mm,
+        font=\tiny\bfseries] at ($(#1+0.5,#2+0.5)!0.5!(#3+0.5,#4+0.5)$) {#6};}
+
+% highlight a square / ring a square / the long diagonal / a confinement box
+\newcommand{\hl}[3]{\fill[#3,opacity=0.85] (#1,#2) rectangle ++(1,1);}
+\newcommand{\ring}[3]{\draw[#3,line width=1.1pt] (#1+0.06,#2+0.06) rectangle ++(0.88,0.88);}
+\newcommand{\diag}[2]{\draw[#2,line width=0.7pt,dash pattern=on 2pt off 2pt,opacity=0.8]
+  (0,0) -- (#1,#1);}
+\newcommand{\boxoff}[3]{\fill[#3,opacity=0.22] (#1,#1) rectangle (#2,#2);}
+% \cagebox{x0}{y0}{x1}{y1}{colour} -- tint a rectangle of squares, 0-based,
+% both corners inclusive.  Used to draw the queen's cage.
+\newcommand{\cagebox}[5]{\fill[#5,opacity=0.20] (#1,#2) rectangle ({#3+1},{#4+1});}
+% \qcut{file}{rank}{n}{colour} -- the queen's file and rank: the two lines the
+% black king cannot cross, and hence the walls of the cage.
+% \fray{f0}{r0}{f1}{r1}{colour} -- one of the queen's lines of attack, centre to
+% centre.  Call it before the piece macros so the discs are drawn over it.
+\newcommand{\fray}[5]{%
+  \draw[#5,line width=1pt,dash pattern=on 2.5pt off 2pt,opacity=0.95]
+    (#1+0.5,#2+0.5) -- (#3+0.5,#4+0.5);}
+\newcommand{\qcut}[4]{%
+  \draw[#4,line width=0.9pt,dash pattern=on 2.5pt off 2pt,opacity=0.95]
+    (#1+0.5,0) -- (#1+0.5,#3) (0,#2+0.5) -- (#3,#2+0.5);}
+
+
+% ---- callout --------------------------------------------------------------
+\newtcolorbox{result}[2][]{enhanced,breakable,colback=#2!5,colframe=#2,
+  boxrule=0pt,leftrule=3pt,arc=1pt,left=8pt,right=8pt,top=6pt,bottom=6pt,
+  fonttitle=\bfseries\color{white},coltitle=white,
+  attach boxed title to top left={xshift=6pt,yshift=-3pt},
+  boxed title style={colback=#2,arc=1pt,boxrule=0pt},#1}

@@ -1,0 +1,32 @@
+generating 5x5 KNNNK: 63 king pairs, 144900 entries/side, 283.01 KiB RAM, 8 threads
+  sub-table 5x5 KNNK: 18900 entries/side
+  init: 63 king pairs, 342 mates, 0.01s
+  ply   1:         1217 wins   ply   2:          336 losses  (0.01s)
+  ply   3:         1374 wins   ply   4:          905 losses  (0.01s)
+  ply   5:         5055 wins   ply   6:         2241 losses  (0.01s)
+  ply   7:         8070 wins   ply   8:         6807 losses  (0.01s)
+  ply   9:        14657 wins   ply  10:        10850 losses  (0.01s)
+  ply  11:        13013 wins   ply  12:        16743 losses  (0.01s)
+  ply  13:        10531 wins   ply  14:        14469 losses  (0.02s)
+  ply  15:         3571 wins   ply  16:         6436 losses  (0.02s)
+  ply  17:          612 wins   ply  18:          924 losses  (0.02s)
+  ply  19:           31 wins   ply  20:           40 losses  (0.02s)
+  solved in 0.02s  (phase A 0.01s, phase B 0.01s)
+        0.02 real         0.03 user         0.00 sys
+             2195456  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 691  page reclaims
+                   1  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+                 299  involuntary context switches
+           313496977  instructions retired
+           120575100  cycles elapsed
+             1605944  peak memory footprint

@@ -1,0 +1,23 @@
+generating 3x3 KNNNK: 5 king pairs, 420 entries/side, 840.00 B RAM, 8 threads
+  sub-table 3x3 KNNK: 180 entries/side
+  init: 5 king pairs, 21 mates, 0.00s
+  ply   1:            8 wins   ply   2:            5 losses  (0.00s)
+  solved in 0.00s  (phase A 0.00s, phase B 0.00s)
+        0.00 real         0.00 user         0.00 sys
+             1720320  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 411  page reclaims
+                  15  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   1  voluntary context switches
+                 108  involuntary context switches
+            21171302  instructions retired
+            10011184  cycles elapsed
+             1147216  peak memory footprint

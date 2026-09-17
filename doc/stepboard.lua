@@ -1,0 +1,303 @@
+-- stepboard.lua -- positions and move application for the stepboard environment.
+--
+-- The environment hands us a board size, a starting position and (optionally) a
+-- list of moves; we play the moves out and emit one optional-content layer per
+-- ply.  With no moves there is one frame and no control row, which is how an
+-- ordinary annotated diagram is set: same badges, same geometry, nothing to
+-- click.  Doing the move application in Lua rather than in TeX macros is not
+-- laziness: applying a move means finding a man, moving it and removing
+-- anything it lands on, and that is a page of expl3 for three lines of Lua.
+-- lualatex is required for this document anyway, for the Unicode chess glyphs.
+local M = {}
+
+local WHITE_GLYPH = { K="\\glyphK", Q="\\glyphQ", R="\\glyphR",
+                      B="\\glyphB", N="\\glyphN", P="\\glyphP" }
+local BLACK_GLYPH = { K="\\glyphk", Q="\\glyphq", R="\\glyphr",
+                      B="\\glyphb", N="\\glyphn", P="\\glyphp" }
+
+local function fail(msg)
+  tex.error("stepboard: " .. msg)
+end
+
+-- "d1" -> 3, 0.  Files are letters, so this tops out at a 26-wide board.
+local function square(s, n)
+  local file, rank = s:match("^(%a)(%d+)$")
+  if not file then fail("cannot read the square '" .. s .. "'") return 0, 0 end
+  local f = string.byte(file) - string.byte("a")
+  local r = tonumber(rank) - 1
+  if f < 0 or f >= n or r < 0 or r >= n then
+    fail("square '" .. s .. "' is off a " .. n .. "x" .. n .. " board")
+    return 0, 0
+  end
+  return f, r
+end
+
+-- "Kd1 Nb3 kb1": upper case is White, lower case is Black.
+local function parse_position(str, n)
+  local men = {}
+  for tok in str:gmatch("%S+") do
+    local p, sq = tok:match("^(%a)(%a%d+)$")
+    if not p then fail("cannot read the man '" .. tok .. "'") end
+    local f, r = square(sq, n)
+    men[#men+1] = { piece = p:upper(), white = (p:upper() == p), f = f, r = r }
+  end
+  return men
+end
+
+local function man_at(men, f, r)
+  for i, m in ipairs(men) do if m.f == f and m.r == r then return i end end
+end
+
+local function find_man(men, piece, white)
+  for i, m in ipairs(men) do
+    if m.piece == piece and m.white == white then return i end
+  end
+end
+
+-- One frame's board, as a call to the document's \bdw.  `under` is drawn before
+-- the men (tints, rays, the long diagonal) and `over` after them (rings,
+-- arrows), which is the order the board macros in endgames-preamble.tex expect.
+local function board(men, n, width, ring, ringcolour, under, over, coords)
+  local t = { "\\bdw{", width, "}{", n, "}{" }
+  if coords then t[#t+1] = "\\coordsn{" .. n .. "}" end
+  if under ~= "" then t[#t+1] = under end
+  for _, m in ipairs(men) do
+    local g = m.white and WHITE_GLYPH[m.piece] or BLACK_GLYPH[m.piece]
+    t[#t+1] = string.format("\\%s{%d}{%d}{%s}", m.white and "pw" or "pbx", m.f, m.r, g)
+  end
+  if ring then
+    t[#t+1] = string.format("\\ring{%d}{%d}{%s}", ring[1], ring[2], ringcolour)
+  end
+  if over ~= "" then t[#t+1] = over end
+  t[#t+1] = "}"
+  return table.concat(t)
+end
+
+-- "Nc5", "Kxb1", "kb1!" -- a piece letter (case gives the colour), an optional
+-- x, the destination, and anything after it is kept as an annotation.
+-- "Kc1-d1", "kg7xh8" -- the long form, naming the square the man starts on.
+-- It is needed whenever a side has two men of the same kind, which for this
+-- document means the two black kings of \S8 and the kings of \S9: the short
+-- form would find whichever of them the position happens to list first.
+local function parse_move(tok, n)
+  local p, rest = tok:match("^(%a)(.*)$")
+  if not p then fail("cannot read the move '" .. tok .. "'") return nil end
+  local from, to, note = rest:match("^(%a%d+)[-x](%a%d+)(.*)$")
+  local ff, fr
+  if from then
+    ff, fr = square(from, n)
+  else
+    rest = rest:gsub("^x", "")
+    to, note = rest:match("^(%a%d+)(.*)$")
+  end
+  if not to then fail("cannot read the move '" .. tok .. "'") return nil end
+  local f, r = square(to, n)
+  return { piece = p:upper(), white = (p:upper() == p), f = f, r = r,
+           ff = ff, fr = fr, from = from, note = note, square = to }
+end
+
+-- Returns the list of frames: each is {board=, caption=, tomove=}.
+function M.frames(n, position, moves, bwidth, intro, opt)
+  local men = parse_position(position, n)
+  local under, over, coords = opt.under, opt.over, opt.coords
+  local list = {}
+  for tok in moves:gmatch("[^,%s]+") do
+    local mv = parse_move(tok, n)
+    if mv then list[#list+1] = { mv = mv, tok = tok } end
+  end
+  -- The opening position is the first mover's turn; after that each frame is
+  -- the other side's, until a king is taken and there is no turn at all.  With
+  -- no moves to read it from, the `tomove` key says whose turn it is.
+  local first = opt.tomove
+  if first == "" then
+    first = list[1] and (list[1].mv.white and "w" or "b") or "w"
+  elseif first == "none" then
+    first = nil
+  end
+  local frames = { { board = board(men, n, bwidth, nil, nil, under, over, coords),
+                     caption = intro, tomove = first } }
+  local number, started, over_ = 0, false, false
+  for _, entry in ipairs(list) do
+    local mv, tok = entry.mv, entry.tok
+    local i
+    if mv.ff then
+      i = man_at(men, mv.ff, mv.fr)
+      if i and (men[i].piece ~= mv.piece or men[i].white ~= mv.white) then i = nil end
+    else
+      i = find_man(men, mv.piece, mv.white)
+    end
+    if not i then
+      fail("there is no " .. (mv.white and "white " or "black ") .. mv.piece ..
+           " to play " .. tok)
+    else
+      local victim = man_at(men, mv.f, mv.r)
+      local capture, victim_piece = false, nil
+      if victim then
+        victim_piece = men[victim].piece
+        if men[victim].white == mv.white then
+          fail(tok .. " lands on its own man")
+        else
+          table.remove(men, victim)
+          capture = true
+          if victim < i then i = i - 1 end
+        end
+      end
+      men[i].f, men[i].r = mv.f, mv.r
+      -- number the way a score sheet would, even if Black moves first
+      local prefix
+      if mv.white then
+        number = number + 1; started = true
+        prefix = number .. ". "
+      else
+        if not started then number = 1; started = true; prefix = "1\\ldots "
+        else prefix = number .. "\\ldots " end
+      end
+      -- With an origin given, show it: two black kings on the board make
+      -- "13. Ke5" ambiguous where "13. Ke5-d6" is not.
+      local text
+      if mv.from then
+        text = prefix .. mv.piece .. mv.from ..
+               (capture and "$\\times$" or "--") .. mv.square
+      else
+        text = prefix .. mv.piece .. (capture and "$\\times$" or "") .. mv.square
+      end
+      if mv.note ~= "" then text = text .. " \\textbf{" .. mv.note .. "}" end
+      if capture and victim_piece == "K" then over_ = true end
+      frames[#frames+1] = {
+        board = board(men, n, bwidth, {mv.f, mv.r},
+                      mv.white and "arrowW" or "arrowB", under, over, coords),
+        caption = text,
+        tomove = (not over_) and (mv.white and "b" or "w") or nil }
+    end
+  end
+  return frames
+end
+
+-- Emit the whole widget.  The structure here is load-bearing; see stepboard.sty.
+function M.emit(id, n, position, moves, width, bwidth, height, intro, bg,
+                variant, tomove, under, over, coords)
+  local opt = { tomove = tomove, under = under, over = over,
+                coords = (coords ~= "false") }
+  local F = M.frames(n, position, moves, bwidth, intro, opt)
+  local out = {}
+  local function w(s) out[#out+1] = s end
+
+  -- The badge and the side-to-move marker sit at the board's edges.  The badge
+  -- is constant for the whole line, so it is drawn once; whose turn it is
+  -- changes ply by ply, so in a stepped diagram the marker has to be layered.
+  local function badge(rlap)
+    local b = "\\sbatright{\\sbbadge{" .. variant .. "}}"
+    return rlap and ("\\rlap{" .. b .. "}") or b
+  end
+  local function mark(f)
+    local disc = f.tomove and ("\\sb" .. f.tomove .. "tm") or ""
+    return "\\sbatleft{\\sbmark{" .. bg .. "}{{\\scriptsize\\color{inksoft}"
+           .. disc .. "}}}"
+  end
+
+  w("\\begingroup\\sbsetwidth{" .. width .. "}\\sbsetboard{" .. bwidth .. "}%\n")
+
+  if #F == 1 then
+    -- A plain diagram: one frame, no controls, nothing to click.  It goes
+    -- through this environment all the same so that the badges, the widths and
+    -- the caption are set the same way as on a stepped one.
+    if height ~= "" then
+      w("\\begin{minipage}[t][" .. height .. "][t]{\\sbwidth}\\centering\n")
+    else
+      w("\\begin{minipage}[t]{\\sbwidth}\\centering\n")
+    end
+    w("\\makebox[\\sbwidth][c]{" .. F[1].board .. "}\\\\[1.5mm]\n")
+    w("\\mbox{\\rlap{" .. mark(F[1]) .. "}" .. badge(false) .. "}%\n")
+    if F[1].caption ~= "" then
+      -- a parbox, not a \\makebox: a caption is often two or three lines and
+      -- has to wrap.  A stepped diagram's captions wrap the same way, but into
+      -- boxes of one common height, since they are stacked.
+      w("\\\\[1.2mm]\\parbox[t]{\\sbwidth}{\\sbcaptext{"
+        .. F[1].caption .. "}}\n")
+    end
+    w("\\end{minipage}\\endgroup%\n")
+  else
+    local last = #F - 1                    -- layers are numbered from 0
+    local tag = "sb" .. id .. "ocg"
+    local function layer(i, body)
+      return "\\begin{ocg}[showingui=false]{step " .. id .. " ply " .. i .. "}{"
+             .. tag .. i .. "}{" .. (i == 0 and 1 or 0) .. "}%\n" .. body
+             .. "%\n\\end{ocg}"
+    end
+    -- Backwards: the last ply first and ply 0 last, so ply 0 is the one on top
+    -- where a viewer cannot resolve the layers and draws them all.  Every ply
+    -- is the same width, so it does not matter to the box which one is the
+    -- unlapped one; it matters only that it is the one drawn last.
+    local function stack(items)
+      local t = { "\\mbox{%\n" }
+      for k = #items, 1, -1 do
+        t[#t+1] = (k > 1) and ("\\rlap{" .. items[k] .. "}%\n") or (items[k] .. "%\n")
+      end
+      t[#t+1] = "}"
+      return table.concat(t)
+    end
+
+    local boards, caps, phantoms, marks = {}, {}, {}, {}
+    for i, f in ipairs(F) do
+      local k = i - 1
+      marks[i]  = layer(k, mark(f))
+      boards[i] = layer(k, "\\makebox[\\sbwidth][c]{" .. f.board .. "}")
+      caps[i]   = layer(k, "\\sbcap{" .. bg .. "}{" .. f.caption .. "}")
+      local function link(live, target, sym)
+        local ph = "\\phantom{" .. sym .. "}"
+        if not live then return ph end
+        return "\\actionsocg{}{" .. tag .. target .. "}{" .. tag .. k .. "}{" .. ph .. "}"
+      end
+      phantoms[i] = layer(k, "\\sbrow{" .. link(k > 0, k - 1, "\\sbback") .. "}{"
+                             .. link(k < last, k + 1, "\\sbnext") .. "}{"
+                             .. link(k > 0, 0, "\\sbstart") .. "}")
+    end
+    -- back is dead on the first ply and next on the last, so those two plies get
+    -- an overlay that repaints the row greyed.  Two extra copies of the glyphs,
+    -- not one per ply: the row itself is drawn once, outside every layer.
+    local strip = "\\rlap{\\textcolor{" .. bg .. "}{\\rule[-\\dp\\sbctlbox]{\\sbwidth}" ..
+                  "{\\dimexpr\\ht\\sbctlbox+\\dp\\sbctlbox\\relax}}}"
+    local dead, live = "\\textcolor{inksoft!35}", "\\textcolor{inksoft}"
+    local grey0 = layer(0, strip .. "\\sbrow{" .. dead .. "{\\sbback}}{" .. live ..
+                           "{\\sbnext}}{" .. dead .. "{\\sbstart}}")
+    local greyN = layer(last, strip .. "\\sbrow{" .. live .. "{\\sbback}}{" .. dead ..
+                              "{\\sbnext}}{" .. live .. "{\\sbstart}}")
+
+    -- Measure every caption before any of them is set.  They are stacked, so
+    -- they all get the height of the tallest; see \sbcap in stepboard.sty.
+    w("\\sbcapreset%\n")
+    for _, f in ipairs(F) do w("\\sbcapmeasure{" .. f.caption .. "}%\n") end
+    w("\\sbox{\\sbctlbox}{\\sbrow{" .. live .. "{\\sbback}}{" .. live ..
+      "{\\sbnext}}{" .. live .. "{\\sbstart}}}%\n")
+    w("\\begin{minipage}[t][" .. (height == "" and "58mm" or height) ..
+      "][t]{\\sbwidth}\\centering\n")
+    w("\\hypersetup{pdfhighlight=/N}%\n")
+    w(stack(boards) .. "\\\\[1.5mm]\n")
+    -- Order matters here.  The greyed overlays paint a strip the full width of
+    -- the row, so the badge and the side-to-move marker have to be drawn after
+    -- them or they would be wiped on the first and last ply.
+    -- greyN before grey0, and the markers backwards, for the same reason the
+    -- stacks are drawn backwards: what ply 0 puts there has to be last.
+    local ctl = { "\\mbox{%\n\\rlap{\\usebox{\\sbctlbox}}%\n",
+                  "\\rlap{" .. greyN .. "}%\n", "\\rlap{" .. grey0 .. "}%\n",
+                  badge(true) .. "%\n" }
+    for k = #marks, 1, -1 do ctl[#ctl+1] = "\\rlap{" .. marks[k] .. "}%\n" end
+    for k = #phantoms, 1, -1 do
+      ctl[#ctl+1] = (k > 1) and ("\\rlap{" .. phantoms[k] .. "}%\n")
+                             or (phantoms[k] .. "%\n")
+    end
+    ctl[#ctl+1] = "}"
+    w(table.concat(ctl) .. "\\\\[1.2mm]\n")
+    w(stack(caps) .. "\n")
+    w("\\end{minipage}\\endgroup%\n")
+  end
+
+  -- One table entry per line.  Passing the whole chunk as a single string
+  -- would make TeX read it as one line, and the first % (we end lines with one,
+  -- to kill spurious spaces) would comment out everything after it.
+  local lines, whole = {}, table.concat(out)
+  for line in (whole .. "\n"):gmatch("([^\n]*)\n") do lines[#lines+1] = line end
+  tex.print(lines)
+end
+
+return M

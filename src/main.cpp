@@ -1,0 +1,2766 @@
+// main.cpp -- command line front end.
+#include "table.hpp"
+
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <thread>
+
+using namespace kqk;
+
+namespace {
+
+int gThreads = (int)std::max(1u, std::thread::hardware_concurrency());
+
+// Which endgame to build.  Only `gen`, `sizes`, `selftest` and `bruteforce`
+// need it; every command that opens a file takes it from the file's header.
+// Invoking the program as `krk` or `kbbk` selects that endgame.
+Endgame gEndgame = Endgame::KQK;
+
+void usage() {
+    std::printf(R"(egtb -- depth-to-mate endgame tablebases on n x n boards: four with a
+        bare black king against a white king and one or two long-range
+        pieces, and four in which Black is not bare
+
+endgames:
+  kqk    king and queen against king
+  krk    king and rook against king
+  kbbk   king and two bishops against king
+  kbnk   king, bishop and knight against king
+  kqkr   king and queen against king and rook -- the `kqkr` command
+  kqkb   king and queen against king and bishop -- `kqkr --bishop`
+  kqkbb  king and queen against king and TWO bishops -- the `kqkbb` command.
+         Five men, and the first endgame here in which the armed side is the
+         one with two like pieces.  It converts into KQKB when White takes a
+         bishop and into KBBK reversed when Black takes the queen
+  kings  W white kings against B black kings, capture rules only -- the
+         `kings` command.  Nothing on the board but kings, all of them
+         capturable; White must take both of Black's, Black all of White's
+  kqkk   king and queen against TWO black kings -- the `kqkk` command.  Under
+         the mating rules they may stand beside each other but not beside the
+         white king, and a mate counts only when both are mated at once; under
+         --capture there is no mate at all: every king is an ordinary man that
+         can capture and be captured, and you win by taking all of the
+         opponent's -- the only one of the three Black can win
+
+usage:
+  egtb gen -n N [--endgame E] [-o FILE] [--threads T] [--rle]
+                              [--verify] [--stride S] [--quiet] [--hist]
+                              [--scratch DIR] [--probe <squares>]
+  egtb stats   -f FILE [--hist]
+  egtb probe   -f FILE --wk SQ --bk SQ <piece squares> [--btm] [--board]
+  egtb line    -f FILE --wk SQ --bk SQ <piece squares> [--btm] [--board]
+  egtb longest -f FILE [--board]
+  egtb verify  -f FILE [--threads T] [--stride S]
+  egtb bruteforce -n N [--endgame E] [--threads T]
+  egtb policy  [--min N] [--max N] [-n N] [--oracle] [--line] [--rules]
+  egtb bishops [--min N] [--max N] [-n N] [--capture] [--verify]
+                           -- the KBBK census split by the colours of the two
+                           bishops.  Under --capture ...KxB converts into the
+                           K+B vs K capture table, which is not a draw.
+  egtb kqkr    [--min N] [--max N] [-n N] [--verify] [--brute] [--selfcheck]
+                           [--hist] [--draws] [--line] [--probe SQ,SQ,SQ,SQ]
+                           [--bishop  -- KQKB rather than KQKR]
+  egtb kqkbb   [--min N] [--max N] [-n N] [--verify] [--brute] [--selfcheck]
+                           [--hist] [--line] [--probe SQ,SQ,SQ,SQ,SQ]
+                           -- the probe squares are wK,wQ,bK,bB,bB
+  egtb kqkk    [--min N] [--max N] [-n N] [--loose] [--verify] [--brute]
+                           [--capture] [--selfcheck] [--sizes] [--theorem] [--kvkk]
+                           [--stats] [--hist]
+                           [--mates [N]]
+                           [--single [N]]
+                           [--line] [--board] [--probe SQ,SQ,SQ,SQ]
+                           [--probe SQ,SQ,SQ  -- K vs K+K, with --capture]
+                           [-o FILE] [-f FILE] [--rle]
+  egtb kings   [--min N] [--max N] [-n N] [--white W] [--black B]
+                           [--verify] [--brute] [--line] [--progress]
+                           [--probe SQ,...]
+  egtb selftest [--max N] [--brute N] [--threads T]
+  egtb sizes [--max N] [--endgame E] [--kqkbb]
+
+  --scratch DIR puts the two value arrays in a file under DIR instead of in
+  anonymous memory, so a table larger than RAM is paged against the disk rather
+  than against swap.  The file is unlinked as soon as it is created and the
+  space returns when the process exits.  Only worth it past about 10 GiB.
+
+  --endgame takes kqk, krk, kbbk or kbnk; --queen, --rook, --bishops and
+  --kbnk are shorthands, and running the binary under the name `kqk`, `krk`,
+  `kbbk` or `kbnk` -- the symlinks `make` leaves beside it -- picks that
+  endgame.  Piece squares are named after the pieces:
+  --wq for KQK, --wr for KRK, --wb1 and --wb2 for KBBK, --wb and --wn for
+  KBNK.  --wp1 and --wp2 are accepted for any endgame.
+
+squares are algebraic (d4) when N <= 26 and "file,rank" (0-based) otherwise;
+either form is accepted on any board size.  --btm means Black is to move.
+)");
+}
+
+std::string humanBytes(double x) {
+    const char* u[] = { "B", "KiB", "MiB", "GiB", "TiB" };
+    int i = 0;
+    while (x >= 1024.0 && i < 4) { x /= 1024.0; ++i; }
+    char buf[64];
+    std::snprintf(buf, sizeof buf, "%.2f %s", x, u[i]);
+    return buf;
+}
+
+void printBoard(const Geometry& g, const Material& m, const Pos& p) {
+    if (g.n > 40) return;
+    for (int r = g.n - 1; r >= 0; --r) {
+        std::printf("%3d ", r + 1);
+        for (int f = 0; f < g.n; ++f) {
+            Sq s = g.sq(f, r);
+            char c = ((f + r) & 1) ? '.' : '-';
+            if (s == p.wk) c = 'K';
+            else if (s == p.bk) c = 'k';
+            else for (int i = 0; i < m.np; ++i)
+                if (s == p.wp[i]) c = m.letter(i);
+            std::printf("%c ", c);
+        }
+        std::printf("\n");
+    }
+    std::printf("    ");
+    for (int f = 0; f < g.n; ++f)
+        std::printf("%c ", g.n <= 26 ? char('a' + f) : char('0' + f % 10));
+    std::printf("\n");
+}
+
+std::string describe(const Geometry& g, const Material& m, const Pos& p) {
+    std::string s = "wK=" + g.name(p.wk);
+    for (int i = 0; i < m.np; ++i) s += " " + m.label(i) + "=" + g.name(p.wp[i]);
+    return s + " bK=" + g.name(p.bk);
+}
+
+void printStats(const Table& t, bool hist) {
+    const Stats& s = t.st;
+    const Material& m = t.mat;
+    double bytes = 2.0 * (double)t.idx.nslots;
+    char enPrise[40];
+    // With like pieces the label names the piece; with unlike ones there is no
+    // single name, so it stays generic.  It used to say "bishop" for any like
+    // pair, which two knights made wrong.
+    std::snprintf(enPrise, sizeof enPrise, "%s en prise",
+                  (m.np == 1 || m.identical) ? pieceName(m.piece[0]) : "piece");
+    std::printf("endgame               %s  (%s)\n", m.name(), m.have());
+    std::printf("board                 %d x %d\n", t.n, t.n);
+    std::printf("king pairs (canonical)%14llu\n", (unsigned long long)t.idx.nkk);
+    std::printf("piece placements      %14llu   per king pair\n",
+                (unsigned long long)t.idx.npc);
+    std::printf("entries per side      %14llu   (%s in RAM for both sides)\n",
+                (unsigned long long)t.idx.nslots, humanBytes(bytes).c_str());
+    std::printf("\n-- symmetry classes ------------------------------------------\n");
+    std::printf("white to move   legal %14llu   win %14llu   draw %12llu\n",
+                (unsigned long long)s.wLive, (unsigned long long)s.wWin, (unsigned long long)s.wDraw);
+    std::printf("black to move   legal %14llu  loss %14llu   draw %12llu\n",
+                (unsigned long long)s.bLive, (unsigned long long)s.bLoss, (unsigned long long)s.bDraw);
+    std::printf("                 mate %14llu  stalemate %9llu   %-15s %8llu\n",
+                (unsigned long long)s.bMate, (unsigned long long)s.bStale,
+                enPrise, (unsigned long long)s.bEnPrise);
+    if (t.stalemateLoss)
+        std::printf("      stalemate losses %9llu   (capture rules: a stalemate is a loss,"
+                    " so it leaves the draws above)\n", (unsigned long long)s.bStaleLoss);
+    std::printf("\n-- whole board (no symmetry reduction) -----------------------\n");
+    std::printf("white to move   legal %14llu   win %14llu   draw %12llu\n",
+                (unsigned long long)s.fwLive, (unsigned long long)s.fwWin, (unsigned long long)s.fwDraw);
+    std::printf("black to move   legal %14llu  loss %14llu   draw %12llu\n",
+                (unsigned long long)s.fbLive, (unsigned long long)s.fbLoss, (unsigned long long)s.fbDraw);
+    std::printf("                 mate %14llu  stalemate %9llu   %-15s %8llu\n",
+                (unsigned long long)s.fbMate, (unsigned long long)s.fbStale,
+                enPrise, (unsigned long long)s.fbEnPrise);
+    if (t.stalemateLoss)
+        std::printf("      stalemate losses %9llu\n", (unsigned long long)s.fbStaleLoss);
+    std::printf("\nlongest win  %u plies = mate in %u\n", s.maxPly, (s.maxPly + 1) / 2);
+    if (s.longest.wk >= 0)
+        std::printf("  example    %s, white to move\n",
+                    describe(t.geo, m, s.longest).c_str());
+    if (hist) {
+        std::printf("\nmate-in-N distribution (white to move, whole board)\n");
+        for (size_t p = 0; p < s.histWFull.size(); ++p)
+            if (s.histWFull[p])
+                std::printf("  mate in %3zu  %16llu  (%llu classes)\n", (p + 1) / 2,
+                            (unsigned long long)s.histWFull[p], (unsigned long long)s.histW[p]);
+    }
+}
+
+// The endgames in which Black is armed have their own commands, `kqkr` and
+// `kqkbb`.  Everything reached through --endgame goes to the solver in
+// solver.cpp, which assumes a bare black king throughout and would quietly
+// produce nonsense for them, so those two are refused here rather than in the
+// option parser -- `sizes` reports index arithmetic and is happy to describe
+// them.
+bool refuseArmed() {
+    if (!blackArmed(gEndgame)) return false;
+    std::fprintf(stderr, "error: %s is not solved by this command; use `egtb kqkr%s`\n",
+                 Material::of(gEndgame).name(),
+                 gEndgame == Endgame::KQKB ? " --bishop" : "");
+    return true;
+}
+
+int cmdSizes(int argc, char** argv) {
+    int maxN = 64;
+    bool bb = false;
+    for (int i = 0; i < argc; ++i) {
+        if (!std::strcmp(argv[i], "--max") && i + 1 < argc) maxN = std::atoi(argv[++i]);
+        else if (!std::strcmp(argv[i], "--kqkbb")) bb = true;
+    }
+    if (bb) {
+        // KQKBB has its own index, so its sizes are arithmetic rather than a
+        // built table: king pairs from the shared enumeration, and a
+        // configuration that is a queen square times an unordered bishop pair.
+        // Two signed arrays at two bytes an entry make four bytes per entry.
+        std::printf("KQKBB -- king pairs x queen square x unordered bishop pair.\n"
+                    "Entries are signed, so the two arrays cost 4 bytes an entry.\n\n");
+        std::printf("%4s %10s %16s %18s %12s\n", "n", "king pairs", "placements",
+                    "entries/side", "RAM (4 B/e)");
+        for (int n = 3; n <= maxN; ++n) {
+            Geometry g(n);
+            Index ix(g, Material::of(Endgame::KQK));
+            const U64 nsq = (U64)g.nsq;
+            const U64 npc = nsq * (nsq * (nsq - 1) / 2);
+            const U64 entries = ix.nkk * npc;
+            std::printf("%4d %10llu %16llu %18llu %12s%s\n", n,
+                        (unsigned long long)ix.nkk, (unsigned long long)npc,
+                        (unsigned long long)entries,
+                        humanBytes(4.0 * (double)entries).c_str(),
+                        npc > 0xFFFFFFFFull ? "   (beyond the 32-bit codec)" : "");
+        }
+        return 0;
+    }
+    Material m = Material::of(gEndgame);
+    std::printf("%s -- the index depends only on the board, on how many pieces White\n"
+                "has and on whether they are alike, so KQK and KRK share a column.\n\n",
+                m.name());
+    // An entry is one byte per side to move, except where Black is armed: the
+    // table is then signed and costs two.
+    const double bytesPerEntry = blackArmed(m.eg) ? 4.0 : 2.0;
+    std::printf("%4s %10s %14s %16s %12s\n", "n", "king pairs", "placements",
+                "entries/side", blackArmed(m.eg) ? "RAM (4 B/e)" : "RAM (2 B/e)");
+    for (int n = 3; n <= maxN; ++n) {
+        Geometry g(n);
+        Index ix(g, m);
+        std::printf("%4d %10llu %14llu %16llu %12s\n", n, (unsigned long long)ix.nkk,
+                    (unsigned long long)ix.npc, (unsigned long long)ix.nslots,
+                    humanBytes(bytesPerEntry * (double)ix.nslots).c_str());
+    }
+    return 0;
+}
+
+// Whole-board counts for the 8x8 board.  The KQK column is the published
+// literature; the KRK and KBBK columns were first derived by the brute force
+// in brute.cpp, which shares no indexing code with the generator, and are kept
+// here as regression constants.
+struct Known { unsigned long long mate, stale, enPrise, btmDraw, maxPly; };
+// Indexed by Endgame.  KQKR has no row here: it is not solved by Table and the
+// selftest loop below does not visit it.
+const Known gKnown[NUM_ENDGAMES] = {
+    /* KQK  */ { 364,   872,   22176,   23048, 19 },
+    /* KRK  */ { 216,    68,   22176,   22244, 31 },
+    /* KBBK */ { 1552, 10204, 1116752, 4016252, 37 },
+    /* KBNK */ { 464, 12888, 2330120, 2472416, 65 },
+};
+
+// Whole-board white-to-move draws in KBBK that have the bishops on *opposite*
+// colours, by board size.  Every same-coloured position is a draw and needs no
+// table; these are the residue, and the invariant check below pins them down.
+// Index by n, from n = 3.  A zero means "not recorded".
+const unsigned long long gOppDraw[] = {
+    /*  3 */   96,  104,  192,  280,  400,  520,  672,  824,
+    /* 11 */ 1008, 1192, 1408, 1624, 1872, 2120, 2400, 2680,
+};
+
+// Splits the white-to-move side of a KBNK table by whether the bishop stands
+// on the colour of the corners.  On an odd board every corner is the same
+// colour, so a bishop on the other one has no mating corner at all; `deepest`
+// records the deepest win in each class, in plies.
+//
+// Only meaningful for odd n.  Square colour is a D4 invariant exactly when n
+// is odd; on an even board mirroring the files flips it, so the two colours
+// are exchanged by the symmetry group -- they cannot differ, and a split taken
+// over canonical slots would not even be counting what it says, since one
+// orbit then holds positions of both colours.
+void bishopCornerCensus(const Table& t, U64 live[2], U64 draw[2], U32 deepest[2]) {
+    const int cornerCol = t.geo.colour(0);
+    live[0] = live[1] = draw[0] = draw[1] = 0;
+    deepest[0] = deepest[1] = 0;
+    Pos p;
+    for (U64 kk = 0; kk < t.idx.nkk; ++kk) {
+        p.wk = t.idx.kkWk[kk];
+        p.bk = t.idx.kkBk[kk];
+        for (U32 pc = 0; pc < t.idx.npc; ++pc) {
+            U8 v = t.w[kk * t.idx.npc + pc];
+            if (v == V_DEAD) continue;
+            t.idx.decode(pc, p.wp);
+            int c = (t.geo.colour(p.wp[0]) == cornerCol) ? 0 : 1;
+            live[c] += (U64)t.orbitSize(p);
+            if (!isDtm(v)) draw[c] += (U64)t.orbitSize(p);
+            else if (v > deepest[c]) deepest[c] = v;
+        }
+    }
+}
+
+// Splits the white-to-move side of a KBBK table by the colours of the two
+// bishops, weighted by orbit size, i.e. counted over the whole board.
+void bishopColourCensus(const Table& t, U64& sameLive, U64& sameDraw,
+                        U64& oppLive, U64& oppDraw) {
+    sameLive = sameDraw = oppLive = oppDraw = 0;
+    Pos p;
+    for (U64 kk = 0; kk < t.idx.nkk; ++kk) {
+        p.wk = t.idx.kkWk[kk];
+        p.bk = t.idx.kkBk[kk];
+        for (U32 pc = 0; pc < t.idx.npc; ++pc) {
+            U8 v = t.w[kk * t.idx.npc + pc];
+            if (v == V_DEAD) continue;
+            t.idx.decode(pc, p.wp);
+            U64 orb = (U64)t.orbitSize(p);
+            bool drawn = !isDtm(v);
+            if (t.geo.colour(p.wp[0]) == t.geo.colour(p.wp[1])) {
+                sameLive += orb; if (drawn) sameDraw += orb;
+            } else {
+                oppLive += orb;  if (drawn) oppDraw += orb;
+            }
+        }
+    }
+}
+
+// `egtb bishops` -- the KBBK white-to-move census split by the colours of the
+// two bishops, which under capture rules is a different question from the one
+// \S4.2.3 answers.  Under the ordinary rules two bishops on one colour cannot
+// mate and every such position is drawn.  Under capture rules they do not have
+// to mate: king and two same-coloured bishops can take a bare king's last
+// square away, and a stalemate is a win.
+//
+// Square colour is a D4 invariant exactly when n is ODD.  On an even board
+// mirroring the files flips every square's colour, so light-light and
+// dark-dark placements lie in the same orbits: the two classes are exchanged
+// by the symmetry group, their counts are necessarily equal, and a split taken
+// over canonical slots would be attributing a mixed orbit to one of them.  So
+// the two are separated only for odd n; for even n the same-colour total is
+// reported and halved, which is exact for the same reason.
+struct ColourClass {
+    U64 live = 0, win = 0, draw = 0;      // white to move, whole-board placements
+    U64 bLive = 0, bLoss = 0;             // black to move
+    U32 deepest = 0;
+    Pos best{};
+    bool haveBest = false;
+};
+
+// Splits a KBBK table by the colours of the two bishops, counted over the whole
+// board rather than over symmetry classes.
+//
+// Square colour is a D4 invariant exactly when n is ODD.  On an even board
+// mirroring the files flips every square's colour, so one orbit can hold both
+// light-light and dark-dark placements: attributing it to either would be
+// counting something other than what it says.  What is true there, and is what
+// the caller uses, is that the mirror is a value-preserving bijection between
+// the two classes, so each is exactly half of the same-colour total and the two
+// have the same deepest win.
+void bishopColourSplit(const Table& t, ColourClass& light, ColourClass& dark,
+                       ColourClass& same, ColourClass& opp) {
+    const bool oddBoard = (t.n & 1) != 0;
+    Pos p;
+    for (U64 kk = 0; kk < t.idx.nkk; ++kk) {
+        p.wk = t.idx.kkWk[kk];
+        p.bk = t.idx.kkBk[kk];
+        for (U32 pc = 0; pc < t.idx.npc; ++pc) {
+            const U64 i = kk * t.idx.npc + pc;
+            U8 v = t.w[i], vb = t.b[i];
+            if (v == V_DEAD && vb == V_DEAD) continue;
+            t.idx.decode(pc, p.wp);
+            const int c0 = t.geo.colour(p.wp[0]), c1 = t.geo.colour(p.wp[1]);
+            const U64 orb = (U64)t.orbitSize(p);
+            auto add = [&](ColourClass& k) {
+                if (v != V_DEAD) {
+                    k.live += orb;
+                    if (isDtm(v)) {
+                        k.win += orb;
+                        if (!k.haveBest || v > k.deepest) { k.deepest = v; k.best = p; k.haveBest = true; }
+                    } else k.draw += orb;
+                }
+                if (vb != V_DEAD) { k.bLive += orb; if (isDtm(vb)) k.bLoss += orb; }
+            };
+            if (c0 != c1) { add(opp); continue; }
+            add(same);
+            if (oddBoard) add(c0 == 1 ? light : dark);
+        }
+    }
+}
+
+// KNNNK is the one endgame here that converts: a black king that takes a knight
+// reaches KNNK, which is not always drawn, so the KNNK table for the same board
+// has to exist and be attached before KNNNK can be solved.  Under capture rules
+// KNNK and KBBK convert too, into KNK and KBK.  The returned owner must outlive
+// `t`; every other endgame returns null and needs nothing.
+bool gNoSub = false;     // --no-sub: skip the sub-table, to test the guard
+bool gStaleLoss = false; // --capture: score stalemate as a loss (see Table)
+
+std::unique_ptr<Table> attachSub(Table& t, int threads, bool progress) {
+    if (gNoSub) return nullptr;
+    Endgame need;
+    if (t.mat.eg == Endgame::KNNNK)                        need = Endgame::KNNK;
+    else if (t.mat.eg == Endgame::KNNK && t.stalemateLoss) need = Endgame::KNK;
+    // KBBK is the same case one material over: under capture rules ...KxB
+    // leaves K+B vs K, which a bare king does not always survive.
+    else if (t.mat.eg == Endgame::KBBK && t.stalemateLoss) need = Endgame::KBK;
+    else return nullptr;
+    auto sub = std::make_unique<Table>(t.n, need);
+    sub->stalemateLoss = t.stalemateLoss;
+    if (progress)
+        std::fprintf(stderr, "  sub-table %dx%d %s: %llu entries/side\n",
+                     t.n, t.n, sub->mat.name(), (unsigned long long)sub->idx.nslots);
+    // The chain can be two deep: KNNNK -> KNNK -> KNK under capture rules.
+    // KBBK -> KBK is one deep and stops there, KBK's only capture leaving
+    // bare kings.
+    auto deeper = attachSub(*sub, threads, false);
+    sub->generate(threads, false);
+    if (deeper) sub->keepAlive = std::move(deeper);
+    t.sub = sub.get();
+    return sub;
+}
+
+// The terminal positions of the same-coloured KBBK capture table: Black to
+// move, no chess move, and not in check.  Two same-coloured bishops cannot
+// mate -- that is what \S4.2.3 computes -- so under capture rules every one of
+// their terminal wins is a stalemate, and this is the shape of the net.
+struct StaleCensus {
+    U64 total = 0, onBorder = 0, inCorner = 0, oppColour = 0, checked = 0;
+    Pos example{}; bool haveExample = false;
+};
+
+// `want` selects the class: -1 for either same-colour class, or the colour the
+// two bishops must share.  On an even board the file mirror is a
+// value-preserving bijection between the two classes that maps border to
+// border and corner to corner, so the light-light figures are exactly half the
+// same-colour ones and the caller halves rather than filtering.
+void staleShape(const Table& t, StaleCensus& c, int want) {
+    const Geometry& g = t.geo;
+    Pos p;
+    for (U64 kk = 0; kk < t.idx.nkk; ++kk) {
+        p.wk = t.idx.kkWk[kk];
+        p.bk = t.idx.kkBk[kk];
+        const int bf = g.file(p.bk), br = g.rank(p.bk);
+        const bool border = (bf == 0 || br == 0 || bf == t.n - 1 || br == t.n - 1);
+        const bool corner = (bf == 0 || bf == t.n - 1) && (br == 0 || br == t.n - 1);
+        for (U32 pc = 0; pc < t.idx.npc; ++pc) {
+            if (t.b[kk * t.idx.npc + pc] != 0) continue;     // not a terminal loss
+            t.idx.decode(pc, p.wp);
+            const int bc = g.colour(p.wp[0]);
+            if (bc != g.colour(p.wp[1])) continue;                  // same colour only
+            if (want >= 0 && bc != want) continue;
+            const U64 orb = (U64)t.orbitSize(p);
+            c.total += orb;
+            if (border) c.onBorder += orb;
+            if (corner) c.inCorner += orb;
+            if (g.colour(p.bk) != g.colour(p.wp[0])) c.oppColour += orb;
+            // A terminal loss that is a CHECK would be a mate, which two
+            // same-coloured bishops are not supposed to be able to give.
+            if (g.attacks(Piece::Bishop, p.wp[0], p.bk, p.wk, p.wp[1]) ||
+                g.attacks(Piece::Bishop, p.wp[1], p.bk, p.wk, p.wp[0])) c.checked += orb;
+            if (!c.haveExample) { c.example = p; c.haveExample = true; }
+        }
+    }
+}
+
+// `egtb bishops` -- the KBBK census split by the colours of the two bishops.
+//
+// Under the ordinary rules this is \S4.2.3 of the write-up and the answer is
+// known: two bishops on one colour cannot mate, so every such position is
+// drawn.  Under capture rules the question is a different one, because they no
+// longer have to mate -- a stalemate is a win, and king and two same-coloured
+// bishops can take a bare king's last square away.
+int cmdBishops(int argc, char** argv) {
+    int lo = 3, hi = 12;
+    bool verify = false, stale = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string k = argv[i];
+        auto val = [&]() -> std::string { return i + 1 < argc ? argv[++i] : std::string(); };
+        if      (k == "--min")     lo = std::atoi(val().c_str());
+        else if (k == "--max")     hi = std::atoi(val().c_str());
+        else if (k == "-n")        lo = hi = std::atoi(val().c_str());
+        else if (k == "--verify")  verify = true;
+        else if (k == "--stale")   stale = true;
+    }
+    std::printf("K + B + B vs K, both bishops on WHITE squares -- %s rules\n",
+                gStaleLoss ? "CAPTURE" : "ordinary");
+    std::printf("Counts are whole-board placements, depths are plies and stop at the\n"
+                "stalemate; the two further plies to the capture itself are not counted.\n");
+    if (gStaleLoss)
+        std::printf("...KxB converts into the K+B vs K capture table for the same board,\n"
+                    "which is NOT a dead draw, so that table is built and attached first.\n");
+    std::printf("\n%4s %14s %14s %9s %8s   %14s %9s %8s\n",
+                "n", "wtm legal", "white wins", "share", "deepest",
+                "btm legal", "black lost", "share");
+    for (int n = lo; n <= hi; ++n) {
+        Table t(n, Endgame::KBBK);
+        t.stalemateLoss = gStaleLoss;
+        auto sub = attachSub(t, gThreads, false);
+        t.generate(gThreads, false);
+        if (verify) {
+            U64 bad = t.verify(gThreads, 1, false);
+            if (bad) { std::printf("n=%d: %llu verification mismatches -- FAILED\n",
+                                   n, (unsigned long long)bad); return 1; }
+        }
+        ColourClass light, dark, same, opp;
+        bishopColourSplit(t, light, dark, same, opp);
+
+        // On an even board the mirror that flips square colour is in D4, so the
+        // light-light class is the dark-dark class and each is half the total.
+        ColourClass w = light;
+        Pos best = light.best;
+        if ((n & 1) == 0) {
+            w.live = same.live / 2;  w.win = same.win / 2;  w.draw = same.draw / 2;
+            w.bLive = same.bLive / 2; w.bLoss = same.bLoss / 2;
+            w.deepest = same.deepest; w.haveBest = same.haveBest;
+            best = same.best;
+            // Show the representative with the bishops actually on white
+            // squares: mirror the files if the canonical one has them dark.
+            if (w.haveBest && t.geo.colour(best.wp[0]) == 0) {
+                auto flip = [&](Sq q) { return (Sq)(t.geo.rank(q) * t.n + (t.n - 1 - t.geo.file(q))); };
+                best.wk = flip(best.wk); best.bk = flip(best.bk);
+                best.wp[0] = flip(best.wp[0]); best.wp[1] = flip(best.wp[1]);
+            }
+        }
+        std::printf("%4d %14llu %14llu %8.3f%% %8u   %14llu %14llu %8.3f%%\n", n,
+                    (unsigned long long)w.live, (unsigned long long)w.win,
+                    w.live ? 100.0 * (double)w.win / (double)w.live : 0.0,
+                    w.deepest,
+                    (unsigned long long)w.bLive, (unsigned long long)w.bLoss,
+                    w.bLive ? 100.0 * (double)w.bLoss / (double)w.bLive : 0.0);
+        std::printf("     opposite colours: %llu of %llu won, deepest %u\n",
+                    (unsigned long long)opp.win, (unsigned long long)opp.live, opp.deepest);
+        if (w.haveBest)
+            std::printf("     deepest: wK %s  B %s  B %s  vs  bK %s%s\n",
+                        t.geo.name(best.wk).c_str(), t.geo.name(best.wp[0]).c_str(),
+                        t.geo.name(best.wp[1]).c_str(), t.geo.name(best.bk).c_str(),
+                        (n & 1) ? "" : "   (light and dark are mirror images here)");
+        if (stale) {
+            StaleCensus c;
+            // Odd board: filter to the white squares.  Even board: the two
+            // classes are mirror images, so take the pair and halve.
+            const bool odd = (n & 1) != 0;
+            staleShape(t, c, odd ? 1 : -1);
+            if (!odd) { c.total /= 2; c.onBorder /= 2; c.inCorner /= 2;
+                        c.oppColour /= 2; c.checked /= 2; }
+            std::printf("     terminal wins (Black to move, no move): %llu   on the border %llu"
+                        " (%.1f%%)   in a corner %llu   king on the bishops' colour %llu"
+                        "   in check %llu\n",
+                        (unsigned long long)c.total, (unsigned long long)c.onBorder,
+                        c.total ? 100.0 * (double)c.onBorder / (double)c.total : 0.0,
+                        (unsigned long long)c.inCorner,
+                        (unsigned long long)(c.total - c.oppColour),
+                        (unsigned long long)c.checked);
+            if (c.haveExample)
+                std::printf("     example stalemate: wK %s  B %s  B %s  vs  bK %s\n",
+                            t.geo.name(c.example.wk).c_str(),
+                            t.geo.name(c.example.wp[0]).c_str(),
+                            t.geo.name(c.example.wp[1]).c_str(),
+                            t.geo.name(c.example.bk).c_str());
+        }
+        if (n & 1)
+            std::printf("     for contrast, both on DARK squares (the colour of the four"
+                        " corners): %llu of %llu won, deepest %u\n",
+                        (unsigned long long)dark.win, (unsigned long long)dark.live,
+                        dark.deepest);
+        std::fflush(stdout);
+    }
+    return 0;
+}
+
+int cmdSelftest(int argc, char** argv) {
+    int maxN = 8, bruteN = 8;
+    for (int i = 0; i < argc; ++i) {
+        if (!std::strcmp(argv[i], "--max") && i + 1 < argc) maxN = std::atoi(argv[++i]);
+        if (!std::strcmp(argv[i], "--brute") && i + 1 < argc) bruteN = std::atoi(argv[++i]);
+        if (!std::strcmp(argv[i], "--threads") && i + 1 < argc) gThreads = std::atoi(argv[++i]);
+    }
+    int failures = 0;
+
+    for (Endgame eg : { Endgame::KQK, Endgame::KRK, Endgame::KBBK, Endgame::KBNK }) {
+        Material m = Material::of(eg);
+        // The unreduced arrays grow as n^(2 + np), so the two-piece endgame
+        // has to stop sooner.
+        int bruteCap = (m.np == 2) ? std::min(bruteN, 6) : bruteN;
+        std::printf("== %s: %s ==\n", m.name(), m.have());
+        for (int n = 3; n <= maxN; ++n) {
+            Table t(n, eg);
+            auto sub = attachSub(t, gThreads, false);
+            t.generate(gThreads, false);
+            U64 bad = t.verify(gThreads, 1, false);
+            U64 bfBad = 0;
+            bool brute = n <= bruteCap;
+            if (brute) bfBad = bruteForceCheck(t, false);
+            std::printf("n=%2d  pairs=%8llu  entries/side=%12llu  maxDTM=%3u plies (mate in %u)"
+                        "  mismatches=%llu  brute=%s  %s\n",
+                        n, (unsigned long long)t.idx.nkk, (unsigned long long)t.idx.nslots,
+                        t.st.maxPly, (t.st.maxPly + 1) / 2, (unsigned long long)bad,
+                        brute ? (bfBad ? "FAIL" : "ok") : "-",
+                        (bad || bfBad) ? "FAIL" : "ok");
+            if (bad || bfBad) ++failures;
+
+            // KBBK only: the bishops' colours very nearly decide the game
+            // before any search.  Two bishops on one colour can never mate, so
+            // every legal white-to-move position with them must be drawn --
+            // computed here, never assumed.  The converse almost holds: with
+            // opposite colours White wins, bar a small family in which a
+            // bishop is trapped beside a cornered king and every rescue
+            // stalemates.
+            if (eg == Endgame::KBBK) {
+                U64 sameLive, sameDraw, oppLive, oppDraw;
+                bishopColourCensus(t, sameLive, sameDraw, oppLive, oppDraw);
+                bool ok = (sameDraw == sameLive);
+                unsigned long long want =
+                    (n >= 3 && n - 3 < (int)(sizeof gOppDraw / sizeof *gOppDraw))
+                        ? gOppDraw[n - 3] : 0;
+                bool okOpp = (want == 0) || ((U64)want == oppDraw);
+                std::printf("      same-coloured bishops: %llu of %llu white-to-move"
+                            " positions drawn  %s\n",
+                            (unsigned long long)sameDraw, (unsigned long long)sameLive,
+                            ok ? "(all)  ok" : "*** NOT ALL ***");
+                std::printf("      opposite colours: %llu drawn of %llu  %s\n",
+                            (unsigned long long)oppDraw, (unsigned long long)oppLive,
+                            want ? (okOpp ? "ok" : "FAIL") : "(not recorded)");
+                if (!ok || !okOpp) ++failures;
+            }
+
+            // KBNK only: a bishop and knight mate in a corner the bishop can
+            // cover.  On an odd board all four corners share one colour, so a
+            // bishop on the other one has no corner to work with -- and then it
+            // can win nothing that was not already mate in two.  On an even
+            // board the two colours are equivalent, because D4 contains
+            // colour-flipping elements there.
+            if (eg == Endgame::KBNK && (n & 1)) {
+                U64 live[2], draw[2];
+                U32 deepest[2];
+                bishopCornerCensus(t, live, draw, deepest);
+                bool ok = deepest[1] <= 3;              // mate in 2 or less
+                std::printf("      bishop on the corner colour: %llu wtm, %llu drawn,"
+                            " deepest mate in %u\n",
+                            (unsigned long long)live[0], (unsigned long long)draw[0],
+                            (deepest[0] + 1) / 2);
+                std::printf("      bishop off it:               %llu wtm, %llu drawn,"
+                            " deepest mate in %u   %s\n",
+                            (unsigned long long)live[1], (unsigned long long)draw[1],
+                            (deepest[1] + 1) / 2,
+                            ok ? "(never deeper than mate in 2)  ok"
+                               : "*** WINS TOO DEEP ***");
+                if (!ok) ++failures;
+            }
+
+            if (n == 8) {
+                const Known& k = gKnown[(int)eg];
+                if (!k.maxPly) {
+                    std::printf("      8x8 reference counts not yet recorded for %s:"
+                                " mate=%llu stalemate=%llu enPrise=%llu btmDraw=%llu maxPly=%u\n",
+                                m.name(), (unsigned long long)t.st.fbMate,
+                                (unsigned long long)t.st.fbStale,
+                                (unsigned long long)t.st.fbEnPrise,
+                                (unsigned long long)t.st.fbDraw, t.st.maxPly);
+                    continue;
+                }
+                struct { const char* what; unsigned long long got, want; } chk[] = {
+                    { "checkmates",          t.st.fbMate,    k.mate    },
+                    { "stalemates",          t.st.fbStale,   k.stale   },
+                    { "piece en prise",      t.st.fbEnPrise, k.enPrise },
+                    { "black-to-move draws", t.st.fbDraw,    k.btmDraw },
+                    { "deepest win (plies)", t.st.maxPly,    k.maxPly  },
+                };
+                for (auto& c : chk) {
+                    bool ok = c.got == c.want;
+                    std::printf("      8x8 %-20s %8llu  expected %8llu  %s\n",
+                                c.what, c.got, c.want, ok ? "ok" : "FAIL");
+                    if (!ok) ++failures;
+                }
+            }
+        }
+        std::printf("\n");
+    }
+    std::printf("%s\n", failures ? "SELFTEST FAILED" : "selftest passed");
+    return failures ? 1 : 0;
+}
+
+int cmdBrute(int n) {
+    Material m = Material::of(gEndgame);
+    if (n < 3) { std::fprintf(stderr, "error: -n N with N >= 3 is required\n"); return 1; }
+    double sq = (double)n * n;
+    double bytes = 2.0 * sq * sq;
+    for (int i = 0; i < m.np; ++i) bytes *= sq;
+    if (bytes > 4e9) {
+        std::fprintf(stderr, "error: the unreduced arrays would need %s; "
+                             "the brute force is only meant for small boards\n",
+                     humanBytes(bytes).c_str());
+        return 1;
+    }
+    std::fprintf(stderr, "cross-checking %dx%d %s against the unreduced solver (%s)\n",
+                 n, n, m.name(), humanBytes(bytes).c_str());
+    Table t(n, gEndgame);
+    t.stalemateLoss = gStaleLoss;
+    auto sub = attachSub(t, gThreads, false);
+    t.generate(gThreads, false);
+    U64 bad = bruteForceCheck(t, true);
+    std::printf("%llu disagreements -- %s\n", (unsigned long long)bad,
+                bad ? "FAILED" : "the reduced and unreduced tables agree exactly");
+    return bad ? 1 : 0;
+}
+
+// `egtb policy` -- score the table-free mating rule of policy.cpp against the
+// tablebase, exhaustively, on every board size in a range.
+int cmdPolicy(int argc, char** argv) {
+    int lo = 4, hi = 10;
+    bool oracle = false, line = false, rules = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string k = argv[i];
+        auto val = [&]() -> std::string { return i + 1 < argc ? argv[++i] : std::string(); };
+        if      (k == "--min")     lo = std::atoi(val().c_str());
+        else if (k == "--max")     hi = std::atoi(val().c_str());
+        else if (k == "-n")        lo = hi = std::atoi(val().c_str());
+        else if (k == "--threads") gThreads = std::atoi(val().c_str());
+        else if (k == "--oracle")  oracle = true;
+        else if (k == "--line")    line = true;
+        else if (k == "--rules")   rules = true;
+    }
+    if (oracle)
+        std::printf("oracle control: White plays the tablebase's own best move,\n"
+                    "so the ratio must come out exactly 1.00 with no failures.\n\n");
+    std::printf("%3s %12s %9s %10s %7s %9s %9s  %s\n", "n", "positions", "optimum",
+                "this rule", "ratio", "stuck", "cyclic", "verdict");
+    int bad = 0;
+    for (int n = lo; n <= hi; ++n) {
+        PolicyScore s = policyScore(n, oracle, gThreads);
+        bool ok = !s.stuck && !s.cyclic;
+        if (!ok) ++bad;
+        std::printf("%3d %12llu %9d %10d %7.2f %9llu %9llu  %s\n", n,
+                    (unsigned long long)s.positions, s.optimum, s.worst,
+                    s.optimum ? (double)s.worst / s.optimum : 0.0,
+                    (unsigned long long)s.stuck, (unsigned long long)s.cyclic,
+                    ok ? "mates from everywhere" : "*** FAILS ***");
+        Geometry g(n);
+        if (rules)
+            std::printf("      rules fired: mate %llu, search %llu, squeeze %llu, "
+                        "walk %llu, wait %llu, fallback %llu\n",
+                        (unsigned long long)s.rule[0], (unsigned long long)s.rule[1],
+                        (unsigned long long)s.rule[2], (unsigned long long)s.rule[3],
+                        (unsigned long long)s.rule[4], (unsigned long long)s.rule[5]);
+        if (line) {
+            const Pos& from = ok ? s.worstPos : s.failPos;
+            if (ok) std::printf("      worst case: wK %s, wQ %s, bK %s -- %d moves\n",
+                        g.name(from.wk).c_str(), g.name(from.wp[0]).c_str(),
+                        g.name(from.bk).c_str(), s.worst);
+            else    std::printf("      never mates from: wK %s, wQ %s, bK %s\n",
+                        g.name(from.wk).c_str(), g.name(from.wp[0]).c_str(),
+                        g.name(from.bk).c_str());
+            for (size_t t = 0; t < s.line.size(); ++t) {
+                const Pos& q = s.line[t];
+                std::printf("      %3zu. wK %-4s wQ %-4s | bK %-4s  cage %d\n", t + 1,
+                            g.name(q.wk).c_str(), g.name(q.wp[0]).c_str(),
+                            g.name(q.bk).c_str(), s.cage[t]);
+            }
+        }
+        std::fflush(stdout);
+    }
+    return bad ? 1 : 0;
+}
+
+
+// `egtb kqkr` -- king and queen against king and one black man: a rook, or
+// under --bishop a bishop (KQKB, which `egtb kqkbb` converts into).  Signed
+// entries, and conversion into KQK and into KRK or KBK.
+int cmdKqkr(int argc, char** argv) {
+    int lo = 3, hi = 8;
+    Endgame eg = Endgame::KQKR;
+    bool verify = false, brute = false, progress = false, line = false, hist = false;
+    bool draws = false;
+    bool capture = false;
+    std::string probe, lineFrom;
+    bool selfcheck = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string k = argv[i];
+        auto val = [&]() -> std::string { return i + 1 < argc ? argv[++i] : std::string(); };
+        if      (k == "--min")      lo = std::atoi(val().c_str());
+        else if (k == "--max")      hi = std::atoi(val().c_str());
+        else if (k == "-n")         lo = hi = std::atoi(val().c_str());
+        else if (k == "--threads")  gThreads = std::atoi(val().c_str());
+        else if (k == "--verify")   verify = true;
+        else if (k == "--brute")    brute = true;
+        else if (k == "--progress") progress = true;
+        else if (k == "--line")     line = true;
+        else if (k == "--hist")     hist = true;
+        else if (k == "--draws")    draws = true;
+        else if (k == "--probe")    probe = val();
+        else if (k == "--selfcheck") selfcheck = true;
+        else if (k == "--capture" || k == "--stalemate-loss") capture = true;
+        else if (k == "--line-from") lineFrom = val();
+        else if (k == "--bishop")   eg = Endgame::KQKB;
+        else if (k == "--rook")     eg = Endgame::KQKR;
+        else if (k == "--endgame") {
+            std::string v = val();
+            if (!parseEndgame(v, eg) || !blackArmed(eg)) {
+                std::fprintf(stderr, "error: --endgame here takes kqkr or kqkb\n");
+                return 1;
+            }
+        }
+    }
+    if (selfcheck) {
+        std::printf("move generator against a naive one, and the index against the\n"
+                    "definition of a D4 orbit, on random placements:\n");
+        U64 b = kqkrSelfCheck(lo, hi, 60000, true, eg);
+        std::printf("%s\n", b ? "SELF-CHECK FAILED" : "self-check passed");
+        return b ? 1 : 0;
+    }
+    std::printf("%s -- king and queen against king and %s%s\n",
+                Material::of(eg).name(), pieceName(blackPieceOf(eg)),
+                capture ? ", under CAPTURE rules (stalemate loses)" : "");
+    std::printf("%3s %14s %12s %12s %12s %10s %8s  %s\n", "n", "entries/side",
+                "white wins", "draws", "white loses", "deepest", "seconds", "checks");
+    int bad = 0;
+    for (int n = lo; n <= hi; ++n) {
+        TableKQKR t(n, eg);
+        t.stalemateLoss = capture;
+        t.generate(gThreads, progress);
+        std::string checks;
+        if (verify) {
+            U64 m = t.verify(gThreads, progress);
+            checks += m ? ("BELLMAN " + std::to_string(m)) : std::string("bellman ok");
+            if (m) ++bad;
+        }
+        if (brute) {
+            U64 m = kqkrBruteForceCheck(t, progress);
+            if (!checks.empty()) checks += ", ";
+            checks += m ? ("BRUTE " + std::to_string(m)) : std::string("brute ok");
+            if (m) ++bad;
+        }
+        std::printf("%3d %14llu %12llu %12llu %12llu %6d ply %8.2f  %s\n", n,
+                    (unsigned long long)t.idx.nslots,
+                    (unsigned long long)t.st.wWin, (unsigned long long)t.st.wDraw,
+                    (unsigned long long)t.st.wLoss, t.st.maxWinPly, t.st.seconds,
+                    checks.c_str());
+        const std::string bl = t.mat.label(1);          // "bR" or "bB"
+        const Pos& d = t.st.deepest;
+        std::printf("      deepest white win: wK %s, wQ %s, bK %s, %s %s -- mate in %d\n",
+                    t.geo.name(d.wk).c_str(), t.geo.name(d.wp[0]).c_str(),
+                    t.geo.name(d.bk).c_str(), bl.c_str(),
+                    t.geo.name(d.wp[1]).c_str(), (t.st.maxWinPly + 1) / 2);
+        if (t.st.wLoss) {
+            const Pos& e = t.st.deepestLoss;
+            std::printf("      deepest white loss: wK %s, wQ %s, bK %s, %s %s -- %d ply\n",
+                        t.geo.name(e.wk).c_str(), t.geo.name(e.wp[0]).c_str(),
+                        t.geo.name(e.bk).c_str(), bl.c_str(),
+                        t.geo.name(e.wp[1]).c_str(), t.st.maxLossPly);
+        }
+        if (capture) {
+            std::printf("      stalemates scored as losses: %llu of Black, %llu of White\n",
+                        (unsigned long long)t.st.staleLossB,
+                        (unsigned long long)t.st.staleLossW);
+            if (t.st.immobile)
+                std::printf("      WARNING: %llu totally immobile terminals -- the other"
+                            " clause of the theorem fired\n",
+                            (unsigned long long)t.st.immobile);
+        }
+        if (!probe.empty()) {
+            // --probe wk,wq,bk,br  (algebraic).  Prints the entry for both
+            // sides to move, so the same placement can be compared across
+            // board sizes.
+            std::string f[4]; int k = 0;
+            for (char ch : probe) { if (ch == ',') { if (++k > 3) break; } else f[k] += ch; }
+            Pos q; q.wk = t.geo.parse(f[0]); q.wp[0] = t.geo.parse(f[1]);
+            q.bk = t.geo.parse(f[2]); q.wp[1] = t.geo.parse(f[3]);
+            auto say = [&](int16_t v) {
+                if (v == 32766) return std::string("illegal");
+                if (v == 0)     return std::string("draw");
+                if (v > 0) return "White mates in " + std::to_string((v - 1 + 1) / 2) + " moves";
+                return "Black mates in " + std::to_string((-v - 1 + 1) / 2) + " moves";
+            };
+            std::printf("      probe wK %s wQ %s bK %s %s %s:  white to move: %s;"
+                        "  black to move: %s\n",
+                        t.geo.name(q.wk).c_str(), t.geo.name(q.wp[0]).c_str(),
+                        t.geo.name(q.bk).c_str(), bl.c_str(),
+                        t.geo.name(q.wp[1]).c_str(),
+                        say(t.valueAt(q, true)).c_str(), say(t.valueAt(q, false)).c_str());
+        }
+        if (draws && t.st.wDraw) {
+            // What do the drawn positions look like?  If Black is holding a
+            // fortress, the shape of it should show up in where the men stand.
+            const Geometry& g = t.geo;
+            U64 rookNextToKing = 0, kingsFar = 0, total = 0, shown = 0;
+            std::vector<U64> kdist(2 * t.n, 0), edge(t.n, 0);
+            for (U64 kk = 0; kk < t.idx.nkk; ++kk) {
+                Pos p; p.wk = t.idx.kkWk[kk]; p.bk = t.idx.kkBk[kk];
+                for (U32 pc = 0; pc < t.idx.npc; ++pc) {
+                    if (t.w[kk * t.idx.npc + pc] != 0) continue;      // draws only
+                    t.idx.decode(pc, p.wp);
+                    if (!t.idx.cfgLive(p.wp, p.wk, p.bk)) continue;
+                    ++total;
+                    int df = g.file(p.wk) - g.file(p.bk), dr = g.rank(p.wk) - g.rank(p.bk);
+                    if (df < 0) df = -df; if (dr < 0) dr = -dr;
+                    int d = df > dr ? df : dr;
+                    ++kdist[d];
+                    if (d > t.n / 3) ++kingsFar;
+                    int rf = g.file(p.wp[1]) - g.file(p.bk), rr = g.rank(p.wp[1]) - g.rank(p.bk);
+                    if (rf < 0) rf = -rf; if (rr < 0) rr = -rr;
+                    if ((rf > rr ? rf : rr) <= 1) ++rookNextToKing;
+                    int e = g.file(p.bk);
+                    if (g.rank(p.bk) < e) e = g.rank(p.bk);
+                    if (t.n - 1 - g.file(p.bk) < e) e = t.n - 1 - g.file(p.bk);
+                    if (t.n - 1 - g.rank(p.bk) < e) e = t.n - 1 - g.rank(p.bk);
+                    ++edge[e];
+                    if (shown < 6) {
+                        std::printf("      drawn: wK %-4s wQ %-4s bK %-4s %s %-4s\n",
+                                    g.name(p.wk).c_str(), g.name(p.wp[0]).c_str(),
+                                    g.name(p.bk).c_str(), bl.c_str(),
+                                    g.name(p.wp[1]).c_str());
+                        ++shown;
+                    }
+                }
+            }
+            if (total) {
+                std::printf("      %llu drawn placements: the piece beside its king %.1f%%, "
+                            "kings more than n/3 apart %.1f%%\n",
+                            (unsigned long long)total, 100.0 * rookNextToKing / total,
+                            100.0 * kingsFar / total);
+                std::printf("      black king's distance to the nearest edge:");
+                for (int e = 0; e < t.n / 2 + 1 && e < (int)edge.size(); ++e)
+                    if (edge[e]) std::printf("  %d:%.0f%%", e, 100.0 * edge[e] / total);
+                std::printf("\n");
+            }
+        }
+        if (hist) {
+            // The deep tail is what matters, so print it densely and the bulk
+            // in decades.
+            std::printf("      white-to-move wins by ply (odd plies only):\n");
+            for (int q = 1; q <= t.st.maxWinPly; q += 2) {
+                U64 c = t.st.histW[q];
+                if (!c) continue;
+
+                std::printf("        %4d ply: %llu\n", q, (unsigned long long)c);
+            }
+        }
+        if (line || !lineFrom.empty()) {
+            // Walk the principal variation.  The mover takes the shortest win
+            // it has; failing that the longest defeat.  The stored value must
+            // fall by exactly one every ply, which is the certificate that the
+            // depth is real.
+            //
+            // --line-from starts from a placement of one's own rather than
+            // from the deepest win, so that the same position can be followed
+            // across board sizes.
+            Pos c = t.st.deepest;
+            int limit = t.st.maxWinPly;
+            if (!lineFrom.empty()) {
+                std::string f[4]; int k = 0;
+                for (char ch : lineFrom) { if (ch == ',') { if (++k > 3) break; } else f[k] += ch; }
+                c.wk = t.geo.parse(f[0]); c.wp[0] = t.geo.parse(f[1]);
+                c.bk = t.geo.parse(f[2]); c.wp[1] = t.geo.parse(f[3]);
+                int16_t v0 = t.valueAt(c, true);
+                if (v0 == 32766) { std::printf("      --line-from: illegal placement\n"); v0 = 0; }
+                limit = v0 > 0 ? v0 - 1 : (v0 < 0 ? -v0 - 1 : 0);
+                std::printf("      line from wK %s wQ %s bK %s %s %s, white to move"
+                            " -- value %d\n",
+                            t.geo.name(c.wk).c_str(), t.geo.name(c.wp[0]).c_str(),
+                            t.geo.name(c.bk).c_str(), bl.c_str(),
+                            t.geo.name(c.wp[1]).c_str(), (int)v0);
+            }
+            bool wtm = true;
+            for (int ply = 0; ply <= limit; ++ply) {
+                int16_t v = t.valueAt(c, wtm);
+                std::printf("      %3d %s  wK %-4s wQ %-4s bK %-4s %s %-4s   value %d\n",
+                            ply, wtm ? "W" : "b",
+                            t.geo.name(c.wk).c_str(), t.geo.name(c.wp[0]).c_str(),
+                            t.geo.name(c.bk).c_str(), bl.c_str(),
+                            t.geo.name(c.wp[1]).c_str(), (int)v);
+                Pos best{}; bool got = false, bestCap = false;
+                long bestKey = 0;
+                kqkrMoves(t, c, wtm, [&](const Pos& q, bool cap, int16_t val) {
+                    long tier, sub;
+                    const bool moverWins = wtm ? (val > 0 && val < 32766) : (val < 0);
+                    if (moverWins)      { tier = 0; sub = wtm ? val : -val; }
+                    else if (val == 0)  { tier = 1; sub = 0; }
+                    else                { tier = 2; sub = wtm ? val : -val; }
+                    long key = tier * 1000000 + sub;
+                    if (!got || key < bestKey) { got = true; bestKey = key;
+                                                 best = q; bestCap = cap; }
+                });
+                if (!got) { std::printf("      (no moves -- mate or stalemate)\n"); break; }
+                if (bestCap) {
+                    // Every other row is labelled with the side to move in the
+                    // position it shows, and this one is too: after a capture
+                    // that is the side that did not make it.
+                    std::printf("      %3d %s  %s captures -> wK %-4s wQ %-4s bK %-4s"
+                                " %s %-4s   leaves %s\n", ply + 1, wtm ? "b" : "W",
+                                wtm ? "White" : "Black",
+                                t.geo.name(best.wk).c_str(), t.geo.name(best.wp[0]).c_str(),
+                                t.geo.name(best.bk).c_str(), bl.c_str(),
+                                t.geo.name(best.wp[1]).c_str(),
+                                wtm ? "KQK" : Material::of(subEndgame(eg)).name());
+                    // The mate itself happens after the conversion, so the line
+                    // is only a line if it follows the game into the table it
+                    // converted into.  White's capture leaves KQK under
+                    // whichever rule set this table was built with.
+                    if (wtm) {
+                        Table kqk(n, Endgame::KQK);
+                        kqk.stalemateLoss = capture;
+                        kqk.generate(gThreads, false);
+                        Pos q; q.wk = best.wk; q.bk = best.bk; q.wp[0] = best.wp[0];
+                        auto pv = kqk.principalVariation(q, false);
+                        int p2 = ply + 2;
+                        bool w2 = true;
+                        for (const Move& mv : pv) {
+                            q = mv.after;
+                            std::printf("      %3d %s  wK %-4s wQ %-4s bK %-4s"
+                                        "              (KQK)\n", p2++, w2 ? "W" : "b",
+                                        t.geo.name(q.wk).c_str(),
+                                        t.geo.name(q.wp[0]).c_str(),
+                                        t.geo.name(q.bk).c_str());
+                            w2 = !w2;
+                        }
+                        std::printf("      mate, %zu plies after the capture\n", pv.size());
+                    }
+                    break;
+                }
+                c = best; wtm = !wtm;
+            }
+        }
+        std::fflush(stdout);
+    }
+    return bad ? 1 : 0;
+}
+
+// ---------------------------------------------------------------------------
+// `egtb kqkbb` -- king and queen against king and two bishops.  Five men, a
+// signed table, and two conversions: KQKB when White takes a bishop, KBBK with
+// the colours swapped when Black takes the queen.  See src/kqkbb.cpp.
+// ---------------------------------------------------------------------------
+int cmdKqkbb(int argc, char** argv) {
+    int lo = 3, hi = 6;
+    bool verify = false, brute = false, progress = false, line = false, hist = false;
+    bool selfcheck = false;
+    std::string probe;
+    for (int i = 0; i < argc; ++i) {
+        std::string k = argv[i];
+        auto val = [&]() -> std::string { return i + 1 < argc ? argv[++i] : std::string(); };
+        if      (k == "--min")       lo = std::atoi(val().c_str());
+        else if (k == "--max")       hi = std::atoi(val().c_str());
+        else if (k == "-n")          lo = hi = std::atoi(val().c_str());
+        else if (k == "--threads")   gThreads = std::atoi(val().c_str());
+        else if (k == "--verify")    verify = true;
+        else if (k == "--brute")     brute = true;
+        else if (k == "--progress")  progress = true;
+        else if (k == "--line")      line = true;
+        else if (k == "--hist")      hist = true;
+        else if (k == "--probe")     probe = val();
+        else if (k == "--selfcheck") selfcheck = true;
+    }
+    if (selfcheck) {
+        std::printf("move generator against a naive one, and the index against the\n"
+                    "definition of a D4 orbit -- with the bishops named both ways\n"
+                    "round -- on random placements:\n");
+        U64 b = kqkbbSelfCheck(lo, hi, 40000, true);
+        std::printf("%s\n", b ? "SELF-CHECK FAILED" : "self-check passed");
+        return b ? 1 : 0;
+    }
+    std::printf("KQKBB -- king and queen against king and two bishops\n");
+    std::printf("%3s %14s %12s %12s %12s %10s %8s  %s\n", "n", "entries/side",
+                "white wins", "draws", "white loses", "deepest", "seconds", "checks");
+    int bad = 0;
+    for (int n = lo; n <= hi; ++n) {
+        TableKQKBB t(n);
+        t.generate(gThreads, progress);
+        std::string checks;
+        if (verify) {
+            U64 m = t.verify(gThreads, progress);
+            checks += m ? ("BELLMAN " + std::to_string(m)) : std::string("bellman ok");
+            if (m) ++bad;
+        }
+        if (brute) {
+            U64 m = kqkbbBruteForceCheck(t, progress);
+            if (!checks.empty()) checks += ", ";
+            checks += m ? ("BRUTE " + std::to_string(m)) : std::string("brute ok");
+            if (m) ++bad;
+        }
+        std::printf("%3d %14llu %12llu %12llu %12llu %6d ply %8.2f  %s\n", n,
+                    (unsigned long long)t.idx.nslots,
+                    (unsigned long long)t.st.wWin, (unsigned long long)t.st.wDraw,
+                    (unsigned long long)t.st.wLoss, t.st.maxWinPly, t.st.seconds,
+                    checks.c_str());
+        auto show = [&](const char* what, const PosBB& p, const char* tail, int v) {
+            std::printf("      %s: wK %s, wQ %s, bK %s, bB %s, bB %s -- %s %d\n", what,
+                        t.geo.name(p.wk).c_str(), t.geo.name(p.wq).c_str(),
+                        t.geo.name(p.bk).c_str(), t.geo.name(p.b1).c_str(),
+                        t.geo.name(p.b2).c_str(), tail, v);
+        };
+        if (t.st.wWin)
+            show("deepest white win", t.st.deepest, "mate in", (t.st.maxWinPly + 1) / 2);
+        if (t.st.wLoss)
+            show("deepest white loss", t.st.deepestLoss, "ply", t.st.maxLossPly);
+        if (t.st.watched)
+            std::printf("      %llu positions had a losing capture and were watched\n",
+                        (unsigned long long)t.st.watched);
+        if (!probe.empty()) {
+            // --probe wk,wq,bk,b1,b2
+            std::string f[5]; int k = 0;
+            for (char ch : probe) { if (ch == ',') { if (++k > 4) break; } else f[k] += ch; }
+            PosBB q;
+            q.wk = t.geo.parse(f[0]); q.wq = t.geo.parse(f[1]); q.bk = t.geo.parse(f[2]);
+            q.b1 = t.geo.parse(f[3]); q.b2 = t.geo.parse(f[4]);
+            auto say = [&](int16_t v) {
+                if (v == VK_DEAD) return std::string("illegal");
+                if (v == 0)       return std::string("draw");
+                if (v > 0) return "White mates in " + std::to_string(v / 2) + " moves";
+                return "Black mates in " + std::to_string(-v / 2) + " moves";
+            };
+            std::printf("      probe wK %s wQ %s bK %s bB %s bB %s:  white to move: %s;"
+                        "  black to move: %s\n",
+                        t.geo.name(q.wk).c_str(), t.geo.name(q.wq).c_str(),
+                        t.geo.name(q.bk).c_str(), t.geo.name(q.b1).c_str(),
+                        t.geo.name(q.b2).c_str(),
+                        say(t.valueAt(q, true)).c_str(), say(t.valueAt(q, false)).c_str());
+        }
+        if (hist) {
+            std::printf("      white-to-move wins by ply (odd plies only):\n");
+            for (int q = 1; q <= t.st.maxWinPly; q += 2)
+                if (t.st.histW[q])
+                    std::printf("        %4d ply: %llu\n", q,
+                                (unsigned long long)t.st.histW[q]);
+        }
+        if (line && t.st.wWin) {
+            // Walk the principal variation from the deepest win.  The mover
+            // takes the shortest win it has; failing that the longest defeat.
+            // The stored value must fall by exactly one every ply, which is
+            // the certificate that the depth is real.
+            PosBB c = t.st.deepest;
+            bool wtm = true;
+            for (int ply = 0; ply <= t.st.maxWinPly; ++ply) {
+                int16_t v = t.valueAt(c, wtm);
+                std::printf("      %3d %s  wK %-4s wQ %-4s bK %-4s bB %-4s bB %-4s"
+                            "   value %d\n", ply, wtm ? "W" : "b",
+                            t.geo.name(c.wk).c_str(), t.geo.name(c.wq).c_str(),
+                            t.geo.name(c.bk).c_str(), t.geo.name(c.b1).c_str(),
+                            t.geo.name(c.b2).c_str(), (int)v);
+                PosBB best{}; bool got = false, bestCap = false;
+                long bestKey = 0;
+                kqkbbMoves(t, c, wtm, [&](const PosBB& q, bool cap, int16_t val) {
+                    long tier, sub;
+                    const bool moverWins = wtm ? (val > 0 && val < VK_DEAD) : (val < 0);
+                    if (moverWins)      { tier = 0; sub = wtm ? val : -val; }
+                    else if (val == 0)  { tier = 1; sub = 0; }
+                    else                { tier = 2; sub = wtm ? val : -val; }
+                    long key = tier * 1000000 + sub;
+                    if (!got || key < bestKey) { got = true; bestKey = key;
+                                                 best = q; bestCap = cap; }
+                });
+                if (!got) { std::printf("      (no moves -- mate or stalemate)\n"); break; }
+                if (bestCap) {
+                    std::printf("      %3d %s  capture -> leaves %s\n", ply + 1,
+                                wtm ? "W" : "b", wtm ? "KQKB" : "K vs KBB");
+                    break;
+                }
+                c = best; wtm = !wtm;
+            }
+        }
+        std::fflush(stdout);
+    }
+    return bad ? 1 : 0;
+}
+
+// ---------------------------------------------------------------------------
+// `egtb kqkk` -- king and queen against TWO black kings, where a mate counts
+// only when both black kings are mated at once.  See src/kqkk.cpp.
+// ---------------------------------------------------------------------------
+std::string kkDescribe(const Geometry& g, const PosKK& p) {
+    return "wK=" + g.name(p.wk) + " wQ=" + g.name(p.wq) +
+           " bK=" + g.name(p.bk1) + " bK=" + g.name(p.bk2);
+}
+
+void kkBoard(const Geometry& g, const PosKK& p) {
+    if (g.n > 40) return;
+    for (int r = g.n - 1; r >= 0; --r) {
+        std::printf("      %3d ", r + 1);
+        for (int f = 0; f < g.n; ++f) {
+            const Sq s = g.sq(f, r);
+            char c = ((f + r) & 1) ? '.' : '-';
+            if (s == p.wk) c = 'K';
+            else if (s == p.wq) c = 'Q';
+            else if (s == p.bk1 || s == p.bk2) c = 'k';
+            std::printf("%c ", c);
+        }
+        std::printf("\n");
+    }
+    std::printf("          ");
+    for (int f = 0; f < g.n; ++f)
+        std::printf("%c ", g.n <= 26 ? char('a' + f) : char('0' + f % 10));
+    std::printf("\n");
+}
+
+// Moves are written from-to throughout: with two black kings on the board
+// "kd7" would not say which one moved.
+std::string kkMoveText(const Geometry& g, const PosKK& a, const PosKK& b, bool cap) {
+    if (a.wk != b.wk) return "K" + g.name(a.wk) + "-" + g.name(b.wk);
+    if (a.wq != b.wq) return "Q" + g.name(a.wq) + "-" + g.name(b.wq);
+    Sq to, from;
+    if (b.bk1 != a.bk1 && b.bk1 != a.bk2) { to = b.bk1; from = (a.bk1 == b.bk2) ? a.bk2 : a.bk1; }
+    else                                  { to = b.bk2; from = (a.bk1 == b.bk1) ? a.bk2 : a.bk1; }
+    return "k" + g.name(from) + (cap ? "x" : "-") + g.name(to);
+}
+
+// The value of a placement, said in words -- and for a draw, why it is one.
+std::string kkSay(const TableKQKK& t, const PosKK& p, bool wtm) {
+    const U8 v = t.valueAt(p, wtm);
+    if (v == V_DEAD) return "illegal";
+    if (v == V_DRAW) {
+        int moves = 0; bool cap = false;
+        kqkkMoves(t, p, wtm, [&](const PosKK&, bool c, U8) { ++moves; if (c) cap = true; });
+        if (!moves && !wtm)
+            return t.inCheck(p, 0) || t.inCheck(p, 1)
+                 ? "draw -- one king is mated, which does not count"
+                 : "draw -- stalemate";
+        if (cap) return "draw -- black takes the queen";
+        return "draw";
+    }
+    char buf[96];
+    if (wtm)         std::snprintf(buf, sizeof buf, "white wins, mate in %d (%d plies)",
+                                   (v + 1) / 2, (int)v);
+    else if (v == 0) std::snprintf(buf, sizeof buf, "black is mated -- both kings at once");
+    else             std::snprintf(buf, sizeof buf, "black is lost, mate in %d (%d plies)",
+                                   (v + 1) / 2, (int)v);
+    return buf;
+}
+
+void kkPrintLine(const TableKQKK& t, const PosKK& start, bool wtm, int indent) {
+    const Geometry& g = t.geo;
+    PosKK cur = start;
+    std::string out;
+    int col = 0, moveNo = 1;
+    if (!wtm) { out += "1... "; col += 5; }
+    for (int ply = 0; ply < 2 * (int)t.st.maxPly + 8; ++ply) {
+        const U8 v = t.valueAt(cur, wtm);
+        if (!isDtm(v) || v == 0) break;
+        PosKK nxt{}; bool cap = false;
+        if (!t.bestMove(cur, wtm, nxt, cap)) break;
+        std::string tok;
+        if (wtm) { tok = std::to_string(moveNo) + ". "; ++moveNo; }
+        tok += kkMoveText(g, cur, nxt, cap);
+        if (cap) tok += " (draw)";
+        else if (t.valueAt(nxt, !wtm) == 0) tok += "#";
+        if (col + (int)tok.size() > 66) { std::printf("%*s%s\n", indent, "", out.c_str());
+                                          out.clear(); col = 0; }
+        if (!out.empty()) { out += " "; ++col; }
+        out += tok; col += (int)tok.size();
+        if (cap) break;
+        cur = nxt; wtm = !wtm;
+    }
+    if (!out.empty()) std::printf("%*s%s\n", indent, "", out.c_str());
+}
+
+void kkPrintStats(const TableKQKK& t, bool hist) {
+    const KqkkStats& s = t.st;
+    const double bytes = 2.0 * (double)t.idx.nslots;
+    std::printf("endgame               KQKK  (white has a queen, black has two kings)\n");
+    std::printf("rules                 %s -- black may not leave %s\n",
+                kkRulesName(t.rules),
+                t.rules == KkRules::Strict ? "either king attacked"
+                                           : "both kings attacked at once");
+    std::printf("board                 %d x %d\n", t.n, t.n);
+    std::printf("king triples (canon.) %14llu\n", (unsigned long long)t.idx.nblk);
+    std::printf("queen squares         %14llu   per king triple\n",
+                (unsigned long long)t.idx.npc);
+    std::printf("entries per side      %14llu   (%s in RAM for both sides)\n",
+                (unsigned long long)t.idx.nslots, humanBytes(bytes).c_str());
+    std::printf("\n-- symmetry classes ------------------------------------------\n");
+    std::printf("white to move   legal %14llu   win %14llu   draw %12llu\n",
+                (unsigned long long)s.wLive, (unsigned long long)s.wWin,
+                (unsigned long long)s.wDraw);
+    std::printf("black to move   legal %14llu  loss %14llu   draw %12llu\n",
+                (unsigned long long)s.bLive, (unsigned long long)s.bLoss,
+                (unsigned long long)s.bDraw);
+    std::printf("           double mate %14llu  stalemate %9llu   queen en prise %8llu\n",
+                (unsigned long long)s.bMate, (unsigned long long)s.bStale,
+                (unsigned long long)s.bEnPrise);
+    std::printf("     of those stalemates, %8llu have one king mated and the other free\n",
+                (unsigned long long)s.bStale1);
+    std::printf("\n-- whole board (no symmetry reduction) -----------------------\n");
+    std::printf("white to move   legal %14llu   win %14llu   draw %12llu\n",
+                (unsigned long long)s.fwLive, (unsigned long long)s.fwWin,
+                (unsigned long long)s.fwDraw);
+    std::printf("black to move   legal %14llu  loss %14llu   draw %12llu\n",
+                (unsigned long long)s.fbLive, (unsigned long long)s.fbLoss,
+                (unsigned long long)s.fbDraw);
+    std::printf("           double mate %14llu  stalemate %9llu   queen en prise %8llu\n",
+                (unsigned long long)s.fbMate, (unsigned long long)s.fbStale,
+                (unsigned long long)s.fbEnPrise);
+    std::printf("     of those stalemates, %8llu have one king mated and the other free\n",
+                (unsigned long long)s.fbStale1);
+    if (s.fwLive)
+        std::printf("\nwhite to move: %.2f%% won, %.2f%% drawn\n",
+                    100.0 * (double)s.fwWin / (double)s.fwLive,
+                    100.0 * (double)s.fwDraw / (double)s.fwLive);
+    std::printf("longest win  %u plies = mate in %u\n", s.maxPly, (s.maxPly + 1) / 2);
+    if (s.longest.wk >= 0)
+        std::printf("  example    %s, white to move\n", kkDescribe(t.geo, s.longest).c_str());
+    if (hist) {
+        std::printf("\nmate-in-N distribution (white to move, whole board)\n");
+        for (size_t p = 0; p < s.histWFull.size(); ++p)
+            if (s.histWFull[p])
+                std::printf("  mate in %3zu  %16llu  (%llu classes)\n", (p + 1) / 2,
+                            (unsigned long long)s.histWFull[p],
+                            (unsigned long long)s.histW[p]);
+    }
+}
+
+// Where the double mates happen: are the two mated kings side by side, and how
+// far from the edge do they stand?  Both are properties of the variant rather
+// than of the search, so they are worth reporting.
+void kkMateShapes(const TableKQKK& t, int show) {
+    const Geometry& g = t.geo;
+    const IndexKQKK& idx = t.idx;
+    U64 total = 0, adjacent = 0, bothEdge = 0, cornered = 0;
+    U64 defended = 0, kingBars = 0, neitherEdge = 0, idle = 0;
+    std::vector<PosKK> examples, openBoard;
+    for (U64 blk = 0; blk < idx.nblk; ++blk) {
+        const Sq wk = idx.blkWk[blk], b1 = idx.blkB1[blk], b2 = idx.blkB2[blk];
+        for (U32 q = 0; q < idx.npc; ++q) {
+            if (t.b[blk * idx.npc + q] != 0) continue;
+            const PosKK p{ wk, (Sq)q, b1, b2 };
+            const U64 orb = (U64)idx.orbitSize(p);
+            total += orb;
+            if (g.kingsTouch(b1, b2)) adjacent += orb;
+            auto edge = [&](Sq s) {
+                return g.file(s) == 0 || g.rank(s) == 0 ||
+                       g.file(s) == g.n - 1 || g.rank(s) == g.n - 1;
+            };
+            auto corner = [&](Sq s) {
+                return (g.file(s) == 0 || g.file(s) == g.n - 1) &&
+                       (g.rank(s) == 0 || g.rank(s) == g.n - 1);
+            };
+            if (edge(b1) && edge(b2)) bothEdge += orb;
+            if (!edge(b1) && !edge(b2)) neitherEdge += orb;
+            if (corner(b1) || corner(b2)) cornered += orb;
+            // How much of the mate is the white king's doing?  He can only be
+            // defending the queen against ...KxQ, or standing beside a square
+            // one of the kings would otherwise have run to.
+            if (g.kingsTouch(p.wq, p.wk)) defended += orb;
+            bool bars = false;
+            for (int wi = 0; wi < 2 && !bars; ++wi) {
+                const Sq mv = wi ? b2 : b1;
+                for (int dd = 0; dd < 8; ++dd) {
+                    const int tf = g.file(mv) + KF[dd], tr = g.rank(mv) + KR[dd];
+                    if (!g.onBoard(tf, tr)) continue;
+                    const Sq to = g.sq(tf, tr);
+                    if (to == b1 || to == b2) continue;
+                    if (g.kingsTouch(to, p.wk)) { bars = true; break; }
+                }
+            }
+            if (bars) kingBars += orb;
+            if (!bars && !g.kingsTouch(p.wq, p.wk)) {
+                idle += orb;                       // the queen mates them alone
+                if (!edge(b1) && !edge(b2) && (int)openBoard.size() < show)
+                    openBoard.push_back(p);
+            }
+            if ((int)examples.size() < show) examples.push_back(p);
+        }
+    }
+    if (!total) { std::printf("      no mates at all\n"); return; }
+    const double T = (double)total;
+    std::printf("      %llu mating placements: kings side by side %.1f%%, "
+                "both on the rim %.1f%%,\n"
+                "      neither on the rim %.1f%%, one in a corner %.1f%%\n",
+                (unsigned long long)total, 100.0 * (double)adjacent / T,
+                100.0 * (double)bothEdge / T, 100.0 * (double)neitherEdge / T,
+                100.0 * (double)cornered / T);
+    std::printf("      the white king's part: defends the queen %.1f%%, "
+                "stands beside a flight square %.1f%%,\n"
+                "      neither -- the queen mates both kings alone -- %.1f%%\n",
+                100.0 * (double)defended / T, 100.0 * (double)kingBars / T,
+                100.0 * (double)idle / T);
+    for (const PosKK& p : openBoard) {
+        std::printf("      mate with the queen alone, both kings off the rim: %s\n",
+                    kkDescribe(t.geo, p).c_str());
+        kkBoard(t.geo, p);
+    }
+    for (const PosKK& p : examples) {
+        std::printf("      mate: %s\n", kkDescribe(t.geo, p).c_str());
+        kkBoard(t.geo, p);
+    }
+}
+
+// The positions this variant is about: Black to move, no legal move at all,
+// and exactly one of the two kings in check.  By the ordinary rule -- no move
+// and in check -- that is mate; by this one it is not, because the other king
+// is not mated with it, so it is stalemate and a draw.
+void kkSingleMates(const TableKQKK& t, int show) {
+    const Geometry& g = t.geo;
+    const IndexKQKK& idx = t.idx;
+    U64 total = 0, shown = 0;
+    for (U64 blk = 0; blk < idx.nblk && shown < (U64)show; ++blk) {
+        const Sq wk = idx.blkWk[blk], b1 = idx.blkB1[blk], b2 = idx.blkB2[blk];
+        for (U32 q = 0; q < idx.npc && shown < (U64)show; ++q) {
+            if (t.b[blk * idx.npc + q] != V_DRAW) continue;
+            const PosKK p{ wk, (Sq)q, b1, b2 };
+            if (t.inCheck(p, 0) == t.inCheck(p, 1)) continue;   // want exactly one
+            int moves = 0;
+            kqkkMoves(t, p, false, [&](const PosKK&, bool, U8) { ++moves; });
+            if (moves) continue;
+            ++total;
+            std::printf("      no legal move, one king in check and the other not:"
+                        " mate by the ordinary\n      rule, a draw by this one --"
+                        " %s, black to move\n", kkDescribe(g, p).c_str());
+            kkBoard(g, p);
+            ++shown;
+        }
+    }
+    if (!total) std::printf("      none on this board\n");
+}
+
+// `egtb kqkk --capture` -- the same two black kings, under capture rules: every
+// king is an ordinary man that captures and can be captured, and a player wins
+// by taking all of the opponent's.  No check and no mate; a side with no move
+// at all would be stalemated, which needs four men on that side and so cannot
+// arise here (README section 5).  Both sides can win, so entries are signed.
+std::string capSayFor(int16_t v, bool whiteToMove) {
+    char s[64];
+    if (v == VC_DEAD) return "illegal";
+    if (v == 0) return "draw";
+    const bool whiteWins = (v > 0) == whiteToMove;
+    std::snprintf(s, sizeof s, "%s wins in %d plies (%d moves)",
+                  whiteWins ? "White" : "BLACK", v > 0 ? v : -v, ((v > 0 ? v : -v) + 1) / 2);
+    return s;
+}
+
+// One output line, wrapped.  Shared by the four-man phase and the sub-endgames
+// it converts into, so a line reads as one game rather than as fragments.
+struct CapLine {
+    std::string out;
+    int col = 0, moveNo = 1, indent = 0;
+    void add(const std::string& tok) {
+        if (col + (int)tok.size() > 66) {
+            std::printf("%*s%s\n", indent, "", out.c_str());
+            out.clear(); col = 0;
+        }
+        if (!out.empty()) { out += " "; ++col; }
+        out += tok; col += (int)tok.size();
+    }
+    void flush() {
+        if (!out.empty()) { std::printf("%*s%s\n", indent, "", out.c_str()); out.clear(); col = 0; }
+    }
+};
+
+Sq capStep(const Geometry& g, Sq s, int d) {
+    const int f = g.file(s) + KF[d], r = g.rank(s) + KR[d];
+    return g.onBoard(f, r) ? g.sq(f, r) : Sq(-1);
+}
+
+// Choose between moves.  A value is what the position is worth to the player
+// who moves *next*, so the mover wants the shortest loss it can hand over and,
+// failing that, the longest win it must concede.
+struct CapPick {
+    bool got = false, over = false;
+    long key = 0;
+    std::string tok;
+    Sq s0 = -1, s1 = -1, s2 = -1;
+    void offer(const std::string& t, Sq a, Sq b, Sq c, bool ends, int16_t val) {
+        long tier, sub;
+        if (ends)         { tier = 0; sub = 0; }
+        else if (val < 0) { tier = 0; sub = -val; }
+        else if (val == 0){ tier = 1; sub = 0; }
+        else              { tier = 2; sub = 1000 - val; }
+        const long k = tier * 100000 + sub;
+        if (!got || k < key) { got = true; key = k; tok = t; s0 = a; s1 = b; s2 = c; over = ends; }
+    }
+};
+
+// K + Q vs K, played out to the capture that ends it.  This is where a white
+// win finishes: not in a mate, but with the last black king taken off.
+void capPlayKQK(const TableKQKKCap& t, Sq wk, Sq wq, Sq bk, bool wtm, CapLine& L) {
+    const Geometry& g = t.geo;
+    for (int ply = 0; ply < 400; ++ply) {
+        CapPick p;
+        if (wtm) {
+            for (int k = 0; k < 8; ++k) {
+                const Sq to = capStep(g, wk, k);
+                if (to < 0 || to == wq) continue;
+                if (to == bk) p.offer("K" + g.name(wk) + "x" + g.name(to), to, wq, -1, true, 0);
+                else p.offer("K" + g.name(wk) + "-" + g.name(to), to, wq, bk, false,
+                             t.q3Value(to, wq, bk, false));
+            }
+            for (int d = 0; d < 8; ++d) {
+                Sq to = wq;
+                for (;;) {
+                    to = capStep(g, to, d);
+                    if (to < 0 || to == wk) break;
+                    if (to == bk) { p.offer("Q" + g.name(wq) + "x" + g.name(to), wk, to, -1, true, 0); break; }
+                    p.offer("Q" + g.name(wq) + "-" + g.name(to), wk, to, bk, false,
+                            t.q3Value(wk, to, bk, false));
+                }
+            }
+        } else {
+            for (int k = 0; k < 8; ++k) {
+                const Sq to = capStep(g, bk, k);
+                if (to < 0) continue;
+                if (to == wk)      p.offer("k" + g.name(bk) + "x" + g.name(to), -1, wq, to, true, 0);
+                else if (to == wq) p.offer("k" + g.name(bk) + "x" + g.name(to), wk, -1, to, false,
+                                           t.kkValue(wk, to, true));
+                else               p.offer("k" + g.name(bk) + "-" + g.name(to), wk, wq, to, false,
+                                           t.q3Value(wk, wq, to, true));
+            }
+        }
+        if (!p.got) break;
+        std::string tok;
+        if (wtm) { tok = std::to_string(L.moveNo) + ". "; ++L.moveNo; }
+        tok += p.tok;
+        if (p.over) tok += wtm ? "  -- the last black king falls" : "  -- the white king falls";
+        L.add(tok);
+        if (p.over) break;
+        wk = p.s0; wq = p.s1; bk = p.s2;
+        if (wq < 0) { L.add("(bare kings, drawn)"); break; }
+        wtm = !wtm;
+        if (t.q3Value(wk, wq, bk, wtm) == 0) { L.add("(drawn)"); break; }
+    }
+}
+
+// K vs K + K, played out likewise.  This is where a black win finishes: the two
+// kings corner the white one and take it.
+void capPlayKKK(const TableKQKKCap& t, Sq wk, Sq a, Sq b, bool wtm, CapLine& L) {
+    const Geometry& g = t.geo;
+    for (int ply = 0; ply < 400; ++ply) {
+        CapPick p;
+        if (wtm) {
+            for (int k = 0; k < 8; ++k) {
+                const Sq to = capStep(g, wk, k);
+                if (to < 0) continue;
+                if (to == a || to == b) {
+                    const Sq rest = (to == a) ? b : a;
+                    p.offer("K" + g.name(wk) + "x" + g.name(to), to, rest, -1, false,
+                            t.kkValue(to, rest, false));
+                } else p.offer("K" + g.name(wk) + "-" + g.name(to), to, a, b, false,
+                               t.k3Value(to, a, b, false));
+            }
+        } else {
+            for (int s = 0; s < 2; ++s) {
+                const Sq from = s ? b : a, oth = s ? a : b;
+                for (int k = 0; k < 8; ++k) {
+                    const Sq to = capStep(g, from, k);
+                    if (to < 0 || to == oth) continue;
+                    if (to == wk) p.offer("k" + g.name(from) + "x" + g.name(to), -1, to, oth, true, 0);
+                    else p.offer("k" + g.name(from) + "-" + g.name(to), wk, to, oth, false,
+                                 t.k3Value(wk, to, oth, true));
+                }
+            }
+        }
+        if (!p.got) break;
+        std::string tok;
+        if (wtm) { tok = std::to_string(L.moveNo) + ". "; ++L.moveNo; }
+        tok += p.tok;
+        if (p.over) tok += "  -- the white king falls";
+        L.add(tok);
+        if (p.over) break;
+        if (p.s2 < 0) { L.add("(bare kings, drawn)"); break; }   // White took one
+        wk = p.s0; a = p.s1; b = p.s2;
+        wtm = !wtm;
+        if (t.k3Value(wk, a, b, wtm) == 0) { L.add("(drawn)"); break; }
+    }
+}
+
+void capPrintLine(const TableKQKKCap& t, const PosKK& start, bool wtm, int indent) {
+    const Geometry& g = t.geo;
+    PosKK cur = start;
+    CapLine L; L.indent = indent;
+    if (!wtm) { L.add("1..."); L.moveNo = 2; }   // Black opened, so White's is move 2
+    for (int ply = 0; ply < 400; ++ply) {
+        const int16_t v = t.valueAt(cur, wtm);
+        if (v == VC_DEAD || v == 0) break;
+        PosKK best{}; CapMove kind = CapMove::Quiet;
+        bool got = false; long bestKey = 0;
+        kqkkCapMoves(t, cur, wtm, [&](const PosKK& q, CapMove m, int16_t val) {
+            long tier, sub;
+            if (m == CapMove::TakesWhiteKing) { tier = 0; sub = 0; }
+            else if (val < 0)  { tier = 0; sub = -val; }
+            else if (val == 0) { tier = 1; sub = 0; }
+            else               { tier = 2; sub = 1000 - val; }
+            const long key = tier * 100000 + sub;
+            if (!got || key < bestKey) { got = true; bestKey = key; best = q; kind = m; }
+        });
+        if (!got) break;
+        std::string tok;
+        if (wtm) { tok = std::to_string(L.moveNo) + ". "; ++L.moveNo; }
+        if (wtm) {
+            const bool cap = (kind == CapMove::TakesKing);
+            if (best.wk != cur.wk) tok += "K" + g.name(cur.wk) + (cap ? "x" : "-") + g.name(best.wk);
+            else                   tok += "Q" + g.name(cur.wq) + (cap ? "x" : "-") + g.name(best.wq);
+        } else {
+            Sq from = -1, to = -1;
+            const Sq na = best.bk1, nb = best.bk2;
+            if (na >= 0 && na != cur.bk1 && na != cur.bk2) {
+                to = na; from = (cur.bk1 == nb) ? cur.bk2 : cur.bk1;
+            } else {
+                to = nb; from = (cur.bk1 == na) ? cur.bk2 : cur.bk1;
+            }
+            tok += "k" + g.name(from) + (kind == CapMove::Quiet ? "-" : "x") + g.name(to);
+        }
+        if (kind == CapMove::TakesWhiteKing) tok += "  -- the white king falls";
+        L.add(tok);
+        // A capture leaves this table.  The game is not over -- the goal is to
+        // take *every* king -- so it is played on in the sub-endgame.
+        if (kind == CapMove::TakesKing) {
+            const Sq rest = (best.bk1 < 0) ? best.bk2 : best.bk1;
+            capPlayKQK(t, best.wk, best.wq, rest, false, L);
+            break;
+        }
+        if (kind == CapMove::TakesQueen) {
+            capPlayKKK(t, best.wk, best.bk1, best.bk2, true, L);
+            break;
+        }
+        if (kind == CapMove::TakesWhiteKing) break;
+        cur = best; wtm = !wtm;
+    }
+    L.flush();
+}
+
+void capPrintStats(const TableKQKKCap& t) {
+    const KqkkCapStats& s = t.st;
+    std::printf("endgame               KQKK, capture rules  (every king is an ordinary\n"
+                "                      man; you win by capturing all of the opponent's;\n"
+                "                      no check and no mate)\n");
+    std::printf("board                 %d x %d\n", t.n, t.n);
+    std::printf("king triples          %14llu   (kings may stand next to each other)\n",
+                (unsigned long long)t.idx.nblk);
+    std::printf("entries per side      %14llu   (%s in RAM, all four tables)\n",
+                (unsigned long long)t.idx.nslots,
+                humanBytes(4.0 * (double)t.idx.nslots + 4.0 * (double)t.idx3.nslots).c_str());
+    std::printf("\n-- the sub-endgames it converts into -------------------------\n");
+    std::printf("K vs K       %llu of %llu placements drawn%s\n",
+                (unsigned long long)s.kkDraws, (unsigned long long)s.kkLive,
+                s.kkDraws == s.kkLive ? "" : "  (the rest: the kings already touch)");
+    std::printf("K vs K + K   black to move: %llu of %llu are black wins%s, deepest %d plies\n",
+                (unsigned long long)s.kkkBlackWins, (unsigned long long)s.kkkLive,
+                s.kkkBlackWins == s.kkkLive ? " -- every one" : "", s.kkkDeepest);
+    std::printf("             white to move: black wins %llu, draw %llu (White takes a king\n"
+                "                            and reaches bare kings), white wins %llu\n",
+                (unsigned long long)s.kkkWtmBlackWins, (unsigned long long)s.kkkWtmDraws,
+                (unsigned long long)(s.kkkLive - s.kkkWtmBlackWins - s.kkkWtmDraws));
+    std::printf("K + Q vs K   white to move: %llu of %llu are white wins%s, deepest %d plies\n",
+                (unsigned long long)s.kqkWhiteWins, (unsigned long long)s.kqkLive,
+                s.kqkWhiteWins == s.kqkLive ? " -- every one" : "", s.kqkDeepest);
+    std::printf("             black to move: white wins %llu, draw %llu (...KxQ), "
+                "black wins %llu (...KxK)\n",
+                (unsigned long long)s.kqkBtmWhiteWins, (unsigned long long)s.kqkBtmDraws,
+                (unsigned long long)s.kqkBtmBlackWins);
+    std::printf("\n-- whole board (no symmetry reduction) -----------------------\n");
+    const double fw = (double)(s.fwWin + s.fwDraw + s.fwLoss);
+    const double fb = (double)(s.fbWin + s.fbDraw + s.fbLoss);
+    std::printf("white to move   White wins %12llu (%5.1f%%)   draw %12llu (%5.1f%%)"
+                "   BLACK wins %10llu (%.1f%%)\n",
+                (unsigned long long)s.fwWin, 100.0*s.fwWin/fw,
+                (unsigned long long)s.fwDraw, 100.0*s.fwDraw/fw,
+                (unsigned long long)s.fwLoss, 100.0*s.fwLoss/fw);
+    std::printf("black to move   BLACK wins %12llu (%5.1f%%)   draw %12llu (%5.1f%%)"
+                "   White wins %10llu (%.1f%%)\n",
+                (unsigned long long)s.fbWin, 100.0*s.fbWin/fb,
+                (unsigned long long)s.fbDraw, 100.0*s.fbDraw/fb,
+                (unsigned long long)s.fbLoss, 100.0*s.fbLoss/fb);
+    const double qw = (double)(s.qwWin + s.qwDraw + s.qwLoss);
+    const double qb = (double)(s.qbWin + s.qbDraw + s.qbLoss);
+    if (qw > 0) {
+        std::printf("\n-- quiet placements only: nothing hanging ------------------\n");
+        std::printf("white to move   White wins %12llu (%5.1f%%)   draw %12llu (%5.1f%%)"
+                    "   BLACK wins %10llu (%.1f%%)\n",
+                    (unsigned long long)s.qwWin, 100.0*s.qwWin/qw,
+                    (unsigned long long)s.qwDraw, 100.0*s.qwDraw/qw,
+                    (unsigned long long)s.qwLoss, 100.0*s.qwLoss/qw);
+        std::printf("black to move   BLACK wins %12llu (%5.1f%%)   draw %12llu (%5.1f%%)"
+                    "   White wins %10llu (%.1f%%)\n",
+                    (unsigned long long)s.qbWin, 100.0*s.qbWin/qb,
+                    (unsigned long long)s.qbDraw, 100.0*s.qbDraw/qb,
+                    (unsigned long long)s.qbLoss, 100.0*s.qbLoss/qb);
+    }
+    std::printf("\ndeepest white win %d plies = %d moves", s.maxWhite, (s.maxWhite + 1) / 2);
+    if (s.deepestWhite.wk >= 0)
+        std::printf("   at %s, white to move", kkDescribe(t.geo, s.deepestWhite).c_str());
+    std::printf("\ndeepest black win %d plies = %d moves", s.maxBlack, (s.maxBlack + 1) / 2);
+    if (s.deepestBlack.wk >= 0)
+        std::printf("   at %s, black to move", kkDescribe(t.geo, s.deepestBlack).c_str());
+    std::printf("\n");
+}
+
+// Quiet placements -- nothing hanging -- in which the side to move is already
+// lost.  With White to move these are the zugzwangs: he must move, and every
+// move loses his king or his queen.
+void capShowLostQuiet(const TableKQKKCap& t, int show) {
+    const Geometry& g = t.geo;
+    const IndexKQKK& ix = t.idx;
+    U64 total = 0, shown = 0;
+    for (U64 blk = 0; blk < ix.nblk; ++blk) {
+        const Sq wk = ix.blkWk[blk], a = ix.blkB1[blk], b = ix.blkB2[blk];
+        for (U32 q = 0; q < ix.npc; ++q) {
+            const U64 s = blk * ix.npc + q;
+            if (t.w[s] == VC_DEAD || t.w[s] >= 0) continue;
+            const Sq wq = (Sq)q;
+            if (g.attacks(Piece::Queen, wq, a, wk, b) ||
+                g.attacks(Piece::Queen, wq, b, wk, a) ||
+                g.kingsTouch(wk, a) || g.kingsTouch(wk, b)) continue;   // not quiet
+            const PosKK p{ wk, wq, a, b };
+            total += (U64)ix.orbitSize(p);
+            if (shown++ < (U64)show) {
+                std::printf("      nothing hanging, White to move, and lost in %d plies: %s\n",
+                            -t.w[s], kkDescribe(g, p).c_str());
+                kkBoard(g, p);
+            }
+        }
+    }
+    std::printf("      %llu such placements in all\n", (unsigned long long)total);
+}
+
+// The theorem of README section 5, checked on the one material for which this
+// program holds both answers: K + Q vs K under the ordinary rules, built by
+// solver.cpp, and the same material under capture rules, built as a sub-table
+// by kqkkcap.cpp.  With one king a side the two games agree except where the
+// side to move has no legal chess move, and there the capture rules make it a
+// loss -- immobility, the other half of the theorem, needs four men on the
+// losing side and cannot arise with two.  So:
+//
+//   * a chess win for the mover stays a win, and a chess loss stays a loss
+//     (capture rules only ever add moves that give a king away);
+//   * every chess checkmate AND every chess stalemate has capture value
+//     exactly -2: the mover must play a move that leaves its king takeable,
+//     and it is taken on the next ply.
+//
+// The last line is the theorem's headline half in its sharpest form, and it is
+// the one an implementation of these rules is most likely to get wrong.
+int capTheoremCheck(int lo, int hi, bool progress) {
+    int bad = 0;
+    std::printf("%3s %14s %12s %12s %12s %10s  %s\n", "n", "chess positions",
+                "wins agree", "losses agree", "mates -> -2", "stale -> -2", "verdict");
+    for (int n = lo; n <= hi; ++n) {
+        Table chess(n, Endgame::KQK);
+        chess.generate(gThreads, progress);
+        TableKQKKCap cap(n);
+        cap.solveSubTables(progress);
+        const Geometry& g = chess.geo;
+        U64 total = 0, wins = 0, losses = 0, mates = 0, stales = 0, wrong = 0;
+        U64 drawKept = 0, drawLost = 0, drawWon = 0;
+        for (Sq wk = 0; wk < g.nsq; ++wk)
+            for (Sq wq = 0; wq < g.nsq; ++wq)
+                for (Sq bk = 0; bk < g.nsq; ++bk) {
+                    if (wq == wk || wq == bk || wk == bk) continue;
+                    if (g.kingsTouch(wk, bk)) continue;   // not a chess position
+                    Pos p; p.wk = wk; p.bk = bk; p.wp[0] = wq;
+                    for (int side = 0; side < 2; ++side) {
+                        const bool wtm = (side == 0);
+                        const U8 cv = chess.valueAt(p, wtm);
+                        if (cv == V_DEAD) continue;       // white to move, black in check
+                        ++total;
+                        const int16_t qv = cap.q3Value(wk, wq, bk, wtm);
+                        auto fail = [&](const char* what) {
+                            if (wrong < 8)
+                                std::fprintf(stderr,
+                                    "  %s: wK %s wQ %s bK %s, %s to move: chess %d, capture %d\n",
+                                    what, g.name(wk).c_str(), g.name(wq).c_str(),
+                                    g.name(bk).c_str(), wtm ? "white" : "black",
+                                    (int)cv, (int)qv);
+                            ++wrong;
+                        };
+                        if (isDtm(cv)) {
+                            // White to move: a chess win.  Black to move: a chess loss.
+                            if (wtm) { if (qv > 0) ++wins; else fail("win not kept"); }
+                            else     { if (qv < 0) ++losses; else fail("loss not kept"); }
+                            // Checkmate: the king falls on the next ply but one.
+                            if (!wtm && cv == 0) {
+                                if (qv == -2) ++mates; else fail("mate is not -2");
+                            }
+                            continue;
+                        }
+                        // A chess draw.  If it is a stalemate the capture rules
+                        // must turn it into a loss in exactly two plies.
+                        int moves = 0;
+                        if (!wtm) genBlackT<Endgame::KQK>(g, p, [&](Sq, int) { ++moves; });
+                        const bool stalemate =
+                            !wtm && moves == 0 && !blackInCheckT<Endgame::KQK>(g, p);
+                        if (stalemate) {
+                            if (qv == -2) ++stales; else fail("stalemate is not -2");
+                            continue;
+                        }
+                        if (qv == 0) ++drawKept; else if (qv < 0) ++drawLost; else ++drawWon;
+                    }
+                }
+        std::printf("%3d %14llu %12llu %12llu %12llu %10llu  %s\n", n,
+                    (unsigned long long)total, (unsigned long long)wins,
+                    (unsigned long long)losses, (unsigned long long)mates,
+                    (unsigned long long)stales,
+                    wrong ? "THEOREM VIOLATED" : "theorem holds");
+        if (wrong) ++bad;
+        // The draws are where the theorem makes no pointwise prediction: a
+        // chess draw can become anything, because a side whose only resource
+        // was a stalemate has lost it and a side that can force one has gained
+        // a win.  Reporting the split says how far the two games really drift.
+        std::printf("      chess draws: %llu still drawn, %llu now lost by the mover, "
+                    "%llu now won by it\n",
+                    (unsigned long long)drawKept, (unsigned long long)drawLost,
+                    (unsigned long long)drawWon);
+        std::fflush(stdout);
+    }
+    return bad;
+}
+
+// `egtb kqkk --capture --kvkk` -- K vs K + K on its own.  It is a three-man
+// endgame and needs neither the queen nor the four-man table, so it reaches
+// board sizes the full capture build never could; and it is where the capture
+// rules' one phase transition lives.
+int capKvKK(int lo, int hi, bool progress) {
+    std::printf("%3s %12s %14s %8s %10s %12s %9s  %s\n", "n", "king triples",
+                "black wins", "of all", "deepest", "wtm draws", "seconds", "verdict");
+    for (int n = lo; n <= hi; ++n) {
+        const auto t0 = std::chrono::steady_clock::now();
+        TableKQKKCap t(n);
+        t.solveKingTables(progress);
+        const double secs = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - t0).count();
+        U64 live = 0, bwin = 0, wdraw = 0;
+        int deepest = 0;
+        for (U64 i = 0; i < t.idx.nblk; ++i) {
+            const U64 orb = (U64)(NSYM / t.idx.blkStabLen[i]);
+            live += orb;
+            if (t.k3B[i] > 0) { bwin += orb; if (t.k3B[i] > deepest) deepest = t.k3B[i]; }
+            if (t.k3W[i] == 0) wdraw += orb;
+        }
+        const bool all = (bwin == live);
+        std::printf("%3d %12llu %14llu %7.1f%% %5d ply %12llu %9.2f  %s\n", n,
+                    (unsigned long long)t.idx.nblk, (unsigned long long)bwin,
+                    100.0 * (double)bwin / (double)live, deepest,
+                    (unsigned long long)wdraw, secs,
+                    all ? "black wins everywhere" : "THE HUNT FAILS");
+        std::fflush(stdout);
+    }
+    return 0;
+}
+
+int cmdKqkkCap(int lo, int hi, bool verify, bool brute, bool progress, bool stats,
+               bool line, bool board, int single, const std::string& probe,
+               const std::string& out, const std::string& in) {
+    if (!in.empty()) {
+        auto t = TableKQKKCap::load(in);
+        capPrintStats(*t);
+        if (single >= 0) capShowLostQuiet(*t, single);
+        if (line && t->st.deepestWhite.wk >= 0) {
+            std::printf("\nthe deepest white win, played out:\n");
+            capPrintLine(*t, t->st.deepestWhite, true, 2);
+        }
+        return 0;
+    }
+    std::printf("%3s %14s %14s %14s %14s %10s %8s  %s\n", "n", "entries/side",
+                "white wins", "draws", "black wins", "deepest", "seconds", "checks");
+    int bad = 0;
+    for (int n = lo; n <= hi; ++n) {
+        TableKQKKCap t(n);
+        t.generate(gThreads, progress);
+        std::string checks;
+        if (verify) {
+            const U64 m = t.verify(gThreads, progress);
+            checks += m ? ("BELLMAN " + std::to_string(m)) : std::string("bellman ok");
+            if (m) ++bad;
+        }
+        if (brute) {
+            const U64 m = kqkkCapBruteForceCheck(t, progress);
+            if (!checks.empty()) checks += ", ";
+            checks += m ? ("BRUTE " + std::to_string(m)) : std::string("brute ok");
+            if (m) ++bad;
+        }
+        std::printf("%3d %14llu %14llu %14llu %14llu %6d ply %8.2f  %s\n", n,
+                    (unsigned long long)t.idx.nslots,
+                    (unsigned long long)t.st.fwWin, (unsigned long long)t.st.fwDraw,
+                    (unsigned long long)t.st.fwLoss, t.st.maxWhite, t.st.seconds,
+                    checks.c_str());
+        if (t.st.deepestWhite.wk >= 0)
+            std::printf("      deepest white win: %s -- %d moves\n",
+                        kkDescribe(t.geo, t.st.deepestWhite).c_str(), (t.st.maxWhite + 1) / 2);
+        if (t.st.deepestBlack.wk >= 0)
+            std::printf("      deepest black win: %s -- %d moves, black to move\n",
+                        kkDescribe(t.geo, t.st.deepestBlack).c_str(), (t.st.maxBlack + 1) / 2);
+        if (stats) { std::printf("\n"); capPrintStats(t); std::printf("\n"); }
+        if (single >= 0) capShowLostQuiet(t, single);
+        if (!probe.empty()) {
+            // Four squares -- wK, wQ and the two black kings -- address the
+            // four-man table.  **Three** address the K vs K + K sub-table,
+            // which is a result in its own right and otherwise only reachable
+            // through the ...KxQ conversion that leads into it.
+            std::string f[4]; int k = 0;
+            for (char ch : probe) { if (ch == ',') { if (++k > 3) break; } else f[k] += ch; }
+            const int given = k + 1;
+            if (given == 3) {
+                const Sq wk = t.geo.parse(f[0]), a = t.geo.parse(f[1]), b = t.geo.parse(f[2]);
+                std::printf("      probe K vs K+K:  wK %s  bK %s  bK %s\n"
+                            "        white to move: %s\n        black to move: %s\n",
+                            t.geo.name(wk).c_str(), t.geo.name(a).c_str(), t.geo.name(b).c_str(),
+                            capSayFor(t.k3Value(wk, a, b, true), true).c_str(),
+                            capSayFor(t.k3Value(wk, a, b, false), false).c_str());
+                if (board) kkBoard(t.geo, PosKK{ wk, -1, a, b });
+                if (line) {
+                    for (int side = 0; side < 2; ++side) {
+                        const bool wtm = side == 0;
+                        if (t.k3Value(wk, a, b, wtm) == 0) continue;
+                        CapLine L; L.indent = 8;
+                        if (!wtm) { L.add("1..."); L.moveNo = 2; }
+                        capPlayKKK(t, wk, a, b, wtm, L);
+                        L.flush();
+                    }
+                }
+            } else {
+            PosKK q{ t.geo.parse(f[0]), t.geo.parse(f[1]), t.geo.parse(f[2]), t.geo.parse(f[3]) };
+            std::printf("      probe %s:\n        white to move: %s\n        black to move: %s\n",
+                        kkDescribe(t.geo, q).c_str(),
+                        capSayFor(t.valueAt(q, true), true).c_str(),
+                        capSayFor(t.valueAt(q, false), false).c_str());
+            if (board) kkBoard(t.geo, q);
+            if (line) {
+                if (t.valueAt(q, true) != 0)  capPrintLine(t, q, true, 8);
+                if (t.valueAt(q, false) != 0) capPrintLine(t, q, false, 8);
+            }
+            }
+        }
+        if (line && probe.empty() && t.st.deepestWhite.wk >= 0) {
+            std::printf("      the deepest white win, played out to the capture:\n");
+            if (board) kkBoard(t.geo, t.st.deepestWhite);
+            capPrintLine(t, t.st.deepestWhite, true, 6);
+        }
+        if (line && probe.empty() && t.st.deepestBlack.wk >= 0) {
+            std::printf("      the deepest black win, played out to the capture:\n");
+            if (board) kkBoard(t.geo, t.st.deepestBlack);
+            capPrintLine(t, t.st.deepestBlack, false, 6);
+        }
+        if (!out.empty()) { t.save(out); std::printf("      wrote %s\n", out.c_str()); }
+        std::fflush(stdout);
+    }
+    return bad ? 1 : 0;
+}
+
+// ---------------------------------------------------------------------------
+// `egtb knnnk` -- three knights against a bare king, and where the win fails.
+//
+// Three knights beat a lone king, so the interesting question is not how deep
+// the win is but which positions escape it, and the answer is not "the ones
+// where a knight hangs".  This walks the table and sorts the white-to-move
+// draws by what Black has going for him:
+//
+//   loose      some knight stands on a square the black king attacks and no
+//              other white man defends -- Black is threatening to take it, and
+//              taking it reaches a KNNK that White does not win;
+//   guarded    a knight is attacked but defended, so the threat is empty;
+//   quiet      the black king attacks nothing at all.
+//
+// The same three buckets are counted over the wins, which is what makes the
+// comparison mean anything: a feature that is as common among the wins as
+// among the draws explains nothing.
+struct KnnnkDraws {
+    U64 wLoose = 0, wGuarded = 0, wQuiet = 0;      // over white-to-move wins
+    U64 dLoose = 0, dGuarded = 0, dQuiet = 0;      // over white-to-move draws
+};
+
+KnnnkDraws knnnkDrawCensus(const Table& t, int threads) {
+    const Geometry& g = t.geo;
+    const Index& idx = t.idx;
+    const U32 npc = idx.npc;
+    std::vector<KnnnkDraws> acc(std::max(1, threads));
+    parallelFor(idx.nkk, 64, threads, [&](U64 lo, U64 hi, int tid) {
+        KnnnkDraws& a = acc[tid];
+        for (U64 kk = lo; kk < hi; ++kk) {
+            Pos p;
+            p.wk = idx.kkWk[kk];
+            p.bk = idx.kkBk[kk];
+            const U64 base = kk * npc;
+            for (U32 pc = 0; pc < npc; ++pc) {
+                U8 vw = t.w[base + pc];
+                if (vw == V_DEAD) continue;
+                idx.decode(pc, p.wp);
+                const U64 orb = (U64)t.orbitSize(p);
+                int attacked = 0, loose = 0;
+                for (int i = 0; i < 3; ++i) {
+                    if (!g.kingsTouch(p.bk, p.wp[i])) continue;   // black king is not on it
+                    ++attacked;
+                    bool defended = g.kingsTouch(p.wk, p.wp[i]);
+                    for (int j = 0; j < 3 && !defended; ++j)
+                        if (j != i && g.attacks(Piece::Knight, p.wp[j], p.wp[i], p.wk))
+                            defended = true;
+                    if (!defended) ++loose;
+                }
+                U64 &lo_ = isDtm(vw) ? a.wLoose : a.dLoose;
+                U64 &gu = isDtm(vw) ? a.wGuarded : a.dGuarded;
+                U64 &qu = isDtm(vw) ? a.wQuiet : a.dQuiet;
+                if (loose)         lo_ += orb;
+                else if (attacked) gu  += orb;
+                else               qu  += orb;
+            }
+        }
+    });
+    KnnnkDraws r;
+    for (const auto& a : acc) {
+        r.wLoose += a.wLoose; r.wGuarded += a.wGuarded; r.wQuiet += a.wQuiet;
+        r.dLoose += a.dLoose; r.dGuarded += a.dGuarded; r.dQuiet += a.dQuiet;
+    }
+    return r;
+}
+
+int cmdKnnnk(int argc, char** argv) {
+    int lo = 3, hi = 8;
+    bool verify = false, brute = false, draws = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string k = argv[i];
+        auto val = [&]() { return (i + 1 < argc) ? std::string(argv[++i]) : std::string(); };
+        if (k == "--min") lo = std::atoi(val().c_str());
+        else if (k == "--max") hi = std::atoi(val().c_str());
+        else if (k == "-n") { lo = hi = std::atoi(val().c_str()); }
+        else if (k == "--verify") verify = true;
+        else if (k == "--brute") brute = true;
+        else if (k == "--draws") draws = true;
+        else if (k == "--threads") gThreads = std::atoi(val().c_str());
+    }
+    std::printf("%3s %10s %16s %14s %14s %8s %8s %7s  %s\n",
+                "n", "king prs", "entries/side", "wtm win", "wtm draw",
+                "draw%", "deepest", "seconds", "checks");
+    for (int n = lo; n <= hi; ++n) {
+        auto t0 = std::chrono::steady_clock::now();
+        Table t(n, Endgame::KNNNK);
+        auto sub = attachSub(t, gThreads, false);
+        t.generate(gThreads, false);
+        double secs = std::chrono::duration<double>(
+                          std::chrono::steady_clock::now() - t0).count();
+        std::string checks;
+        if (verify) {
+            U64 bad = t.verify(gThreads, 1, false);
+            checks += bad ? "BELLMAN FAILED " : "bellman ok ";
+        }
+        if (brute) {
+            U64 bad = bruteForceCheck(t, false);
+            checks += bad ? "BRUTE FAILED " : "brute ok ";
+        }
+        const Stats& s = t.st;
+        double pct = s.fwLive ? 100.0 * (double)s.fwDraw / (double)s.fwLive : 0.0;
+        std::printf("%3d %10llu %16llu %14llu %14llu %7.3f%% %5u ply %7.2f  %s\n",
+                    n, (unsigned long long)t.idx.nkk,
+                    (unsigned long long)t.idx.nslots,
+                    (unsigned long long)s.fwWin, (unsigned long long)s.fwDraw,
+                    pct, s.maxPly, secs, checks.c_str());
+        if (draws) {
+            KnnnkDraws d = knnnkDrawCensus(t, gThreads);
+            U64 wt = d.wLoose + d.wGuarded + d.wQuiet;
+            U64 dt = d.dLoose + d.dGuarded + d.dQuiet;
+            auto pc = [](U64 a, U64 b) { return b ? 100.0 * (double)a / (double)b : 0.0; };
+            std::printf("      draws  loose %llu (%.1f%%)  guarded %llu (%.1f%%)  "
+                        "quiet %llu (%.1f%%)\n",
+                        (unsigned long long)d.dLoose, pc(d.dLoose, dt),
+                        (unsigned long long)d.dGuarded, pc(d.dGuarded, dt),
+                        (unsigned long long)d.dQuiet, pc(d.dQuiet, dt));
+            std::printf("      wins   loose %llu (%.1f%%)  guarded %llu (%.1f%%)  "
+                        "quiet %llu (%.1f%%)\n",
+                        (unsigned long long)d.wLoose, pc(d.wLoose, wt),
+                        (unsigned long long)d.wGuarded, pc(d.wGuarded, wt),
+                        (unsigned long long)d.wQuiet, pc(d.wQuiet, wt));
+            std::printf("      deepest win: %s\n",
+                        describe(t.geo, t.mat, s.longest).c_str());
+        }
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// `egtb kings` -- w white kings against b black kings under CAPTURE rules: the
+// rule set of `kqkk --capture` with the queen deleted, so every man on the
+// board is royal.  See src/kings.cpp.  The conversions are reported with the
+// table, because in this endgame they are results in their own right: K + K vs
+// K is the phalanx of README section 5, and it is what the whole thing rests on.
+// ---------------------------------------------------------------------------
+// Quiet placements -- nothing hanging -- for the kings-only tables: no king of
+// one side standing next to a king of the other, which with nothing but kings
+// on the board is the whole of "nothing is capturable on the move".  It is the
+// same test capShowLostQuiet() applies to the KQKK capture table, minus the
+// queen.
+//
+// It matters most past a phase transition, where the surviving wins may be
+// nothing but placements that are already over: a hunter beside its quarry
+// wins in one ply and says nothing about whether the hunt works.  Walking the
+// placements and probing each is O(placements) and stays cheap while the
+// hunting side has two kings; three would be a billion probes and is refused.
+struct QuietCensus { U64 total = 0, win = 0, draw = 0, loss = 0; };
+
+// Does the man of kind `pc` on `from` bear on `to`, with `occ` the only other
+// square that could block it?  For kings and rooks the relation is symmetric,
+// so one call settles both directions; for a knight it is NOT -- a rook that
+// attacks a knight is not attacked back, which is the whole difference between
+// RR vs R and RR vs N -- so the caller must test both ways.
+static bool capSees(int n, int pc, int from, int to, int occ) {
+    const int ff = from % n, rf = from / n, ft = to % n, rt = to / n;
+    const int df = ff > ft ? ff - ft : ft - ff, dr = rf > rt ? rf - rt : rt - rf;
+    if (pc == CP_KNIGHT) return df * df + dr * dr == 5;
+    if (pc == CP_KING)   return df <= 1 && dr <= 1;
+    if (df == dr && (pc == CP_BISHOP || pc == CP_QUEEN)) {      // on a diagonal
+        const int sf = ft > ff ? 1 : -1, sr = rt > rf ? 1 : -1;
+        for (int i = 1; i < df; ++i)
+            if ((rf + i * sr) * n + (ff + i * sf) == occ) return false;
+        return true;
+    }
+    if (pc == CP_BISHOP) return false;                // and not on a diagonal
+    if (df && dr) return false;                       // rook or queen: not on a line
+    if (!df) { for (int r = std::min(rf, rt) + 1; r < std::max(rf, rt); ++r)
+                   if (r * n + ff == occ) return false; }
+    else     { for (int f = std::min(ff, ft) + 1; f < std::max(ff, ft); ++f)
+                   if (rf * n + f == occ) return false; }
+    return true;
+}
+
+bool kingsQuietCensus(const TableKings& t, int n, int W, int B, bool wtm,
+                      QuietCensus& out, int pw, int pb) {
+    Geometry g(n);
+    const int m = g.nsq;
+    if (W != 2 || B != 1) return false;          // only the case worth walking
+    std::vector<Sq> wq(2), bq(1);
+    for (Sq a = 0; a < m; ++a)
+        for (Sq b = a + 1; b < m; ++b)
+            for (Sq c = 0; c < m; ++c) {
+                if (c == a || c == b) continue;
+                // Quiet means nothing is capturable on the move, by either
+                // side.  The third man is the only possible blocker.
+                if (capSees(n, pw, a, c, b) || capSees(n, pw, b, c, a) ||
+                    capSees(n, pb, c, a, b) || capSees(n, pb, c, b, a)) continue;
+                wq[0] = a; wq[1] = b; bq[0] = c;
+                int16_t v = t.probe(wq, bq, wtm);
+                ++out.total;
+                if (v > 0) ++out.win; else if (v < 0) ++out.loss; else ++out.draw;
+            }
+    return true;
+}
+
+// Accepts "king", "rook", "knight" or any prefix, and the single letters
+// k, r, n.
+static int capPieceParse(const std::string& t, bool& ok) {
+    ok = true;
+    if (!t.empty()) {
+        if (t[0] == 'k' && t != "knight" && t != "kn") return CP_KING;
+        if (t[0] == 'r') return CP_ROOK;
+        if (t[0] == 'b') return CP_BISHOP;
+        if (t[0] == 'q') return CP_QUEEN;
+        if (t[0] == 'n' || t == "knight" || t == "kn") return CP_KNIGHT;
+    }
+    ok = false;
+    return CP_KING;
+}
+
+// `egtb mixed` -- two unlike white men against one black man.  See
+// src/mixed.cpp.  Unreduced, so it is also the cross-check on the D4-reduced
+// solver: give it two LIKE men and it must reproduce `egtb rooks` exactly.
+int cmdMixed(int argc, char** argv) {
+    int lo = 3, hi = 0;
+    int p0 = CP_KING, p1 = CP_QUEEN, pb = CP_KNIGHT;
+    bool line = false, quiet = false, trace = false;
+    for (int i = 0; i < argc; ++i) {
+        std::string k = argv[i];
+        auto val = [&]() { return (i + 1 < argc) ? std::string(argv[++i]) : std::string(); };
+        bool ok = true;
+        if      (k == "--min")     lo = std::atoi(val().c_str());
+        else if (k == "--max")     hi = std::atoi(val().c_str());
+        else if (k == "-n")        { lo = hi = std::atoi(val().c_str()); }
+        else if (k == "--threads") gThreads = std::atoi(val().c_str());
+        else if (k == "--w1")      p0 = capPieceParse(val(), ok);
+        else if (k == "--w2")      p1 = capPieceParse(val(), ok);
+        else if (k == "--bp")      pb = capPieceParse(val(), ok);
+        else if (k == "--line")    line = true;
+        else if (k == "--trace")   { line = true; trace = true; }
+        else if (k == "--quiet")   quiet = true;
+        if (!ok) { std::fprintf(stderr, "mixed: pieces are king|queen|rook|bishop|knight\n"); return 2; }
+    }
+    if (!hi) hi = lo;
+    const char L0 = capPieceLetter(p0), L1 = capPieceLetter(p1), LB = capPieceLetter(pb);
+    std::printf("%c%c vs %c under capture rules: no mate -- a white %s and a white %s "
+                "against a black %s, every man capturable, the game won by taking the "
+                "opponent's last\n\n", L0, L1, LB,
+                capPieceName(p0), capPieceName(p1), capPieceName(pb));
+    std::printf("%3s %14s  %3s %14s %14s %14s %9s %8s\n",
+                "n", "positions", "stm", "White wins", "draws", "Black wins", "deepest", "seconds");
+    for (int n = lo; n <= hi; ++n) {
+        MixedStats s;
+        auto t0 = std::chrono::steady_clock::now();
+        runMixed(n, p0, p1, pb, gThreads, line, quiet, s);
+        s.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        std::printf("%3d %14llu  wtm %14llu %14llu %14llu %5d ply %8.2f\n",
+                    n, (unsigned long long)s.positions, (unsigned long long)s.wWin,
+                    (unsigned long long)s.wDraw, (unsigned long long)s.wLoss,
+                    s.deepestWhite, s.seconds);
+        std::printf("%3s %14s  btm %14llu %14llu %14llu %5d ply\n", "", "",
+                    (unsigned long long)s.bWin, (unsigned long long)s.bDraw,
+                    (unsigned long long)s.bLoss, s.deepestBlack);
+        Geometry g(n);
+        auto show = [&](const std::vector<Sq>& p, int d, const char* who) {
+            if (!d) { std::printf("      no %s win\n", who); return; }
+            std::printf("      deepest %s win: %c%s %c%s %c%s -- %d plies\n", who,
+                        L0, g.name(p[0]).c_str(), L1, g.name(p[1]).c_str(),
+                        (char)(LB | 32), g.name(p[2]).c_str(), d);
+        };
+        show(s.posWhite, s.deepestWhite, "White");
+        show(s.posBlack, s.deepestBlack, "Black");
+        if (line && !s.line.empty()) std::printf("      %s\n", s.line.c_str());
+        if (trace && !s.trace.empty()) {
+            std::printf("      plies remaining, ply by ply:");
+            for (size_t q = 0; q < s.trace.size(); ++q)
+                std::printf("%s%d", q % 18 ? " " : "\n        ", s.trace[q]);
+            std::printf("\n");
+        }
+        if (quiet)
+            std::printf("      quiet (nothing capturable on the move): %llu placements, "
+                        "White wins %llu (%.2f%%) wtm, %llu (%.2f%%) btm\n",
+                        (unsigned long long)s.quiet,
+                        (unsigned long long)s.quietWinW, 100.0 * s.quietWinW / (double)s.quiet,
+                        (unsigned long long)s.quietWinB, 100.0 * s.quietWinB / (double)s.quiet);
+        std::printf("      %c   vs %c   wtm %llu/%llu/%llu  deepest %d ply\n", L0, LB,
+                    (unsigned long long)s.sub0Win, (unsigned long long)s.sub0Draw,
+                    (unsigned long long)s.sub0Loss, s.sub0Deep);
+        std::printf("      %c   vs %c   wtm %llu/%llu/%llu  deepest %d ply\n", L1, LB,
+                    (unsigned long long)s.sub1Win, (unsigned long long)s.sub1Draw,
+                    (unsigned long long)s.sub1Loss, s.sub1Deep);
+    }
+    return 0;
+}
+
+int cmdKings(int argc, char** argv, bool rooks = false) {
+    int pw = rooks ? CP_ROOK : CP_KING, pb = rooks ? CP_ROOK : CP_KING;
+    int lo = 3, hi = 0, W = rooks ? 2 : 3, B = rooks ? 1 : 2, cap = 400;
+    bool verify = false, brute = false, line = false, progress = false;
+    bool quietCensus = false;
+    std::string probe;
+    for (int i = 0; i < argc; ++i) {
+        std::string k = argv[i];
+        auto val = [&]() { return (i + 1 < argc) ? std::string(argv[++i]) : std::string(); };
+        if      (k == "--min")      lo = std::atoi(val().c_str());
+        else if (k == "--max")      hi = std::atoi(val().c_str());
+        else if (k == "-n")         { lo = hi = std::atoi(val().c_str()); }
+        else if (k == "--white")    W = std::atoi(val().c_str());
+        else if (k == "--black")    B = std::atoi(val().c_str());
+        else if (k == "--threads")  gThreads = std::atoi(val().c_str());
+        else if (k == "--verify")   verify = true;
+        else if (k == "--brute")    brute = true;
+        else if (k == "--line")     line = true;
+        else if (k == "--progress") progress = true;
+        else if (k == "--probe")    probe = val();
+        else if (k == "--quiet")    quietCensus = true;
+        else if (k == "--rook" || k == "--rooks") { pw = pb = CP_ROOK; }
+        else if (k == "--wp" || k == "--white-piece") {
+            bool ok; pw = capPieceParse(val(), ok);
+            if (!ok) { std::fprintf(stderr, "capture: --wp king|rook|knight|bishop|queen\n"); return 2; }
+        } else if (k == "--bp" || k == "--black-piece") {
+            bool ok; pb = capPieceParse(val(), ok);
+            if (!ok) { std::fprintf(stderr, "capture: --bp king|rook|knight|bishop|queen\n"); return 2; }
+        }
+    }
+    if (!hi) hi = lo;
+    if (quietCensus && (W != 2 || B != 1)) {
+        std::fprintf(stderr, "kings: --quiet is implemented for --white 2 --black 1\n");
+        return 2;
+    }
+    if (W < 1 || W > 4 || B < 1 || B > 2) {
+        std::fprintf(stderr, "kings: --white 1..4, --black 1..2\n");
+        return 2;
+    }
+    const char PCW = capPieceLetter(pw), PCB = capPieceLetter(pb);
+    const std::string wn(W, PCW), bn(B, PCB);
+    if (pw == CP_KING && pb == CP_KING)
+        std::printf("%s vs %s under capture rules: every king an ordinary man, "
+                    "the game won by taking the last one\n\n", wn.c_str(), bn.c_str());
+    else
+        std::printf("%s vs %s under capture rules: no kings and no mate -- "
+                    "%d white %s%s against %d black %s%s, every man capturable, "
+                    "the game won by taking the opponent's last\n\n",
+                    wn.c_str(), bn.c_str(),
+                    W, capPieceName(pw), W > 1 ? "s" : "",
+                    B, capPieceName(pb), B > 1 ? "s" : "");
+    std::printf("%3s %14s  %3s %14s %14s %14s %9s %8s  %s\n",
+                "n", "positions", "stm", "White wins", "draws", "Black wins",
+                "deepest", "seconds", "checks");
+
+    for (int n = lo; n <= hi; ++n) {
+        TableKings t(n, W, B, pw, pb);
+        t.generate(gThreads, progress);
+        t.census(gThreads, verify);
+        const KingsStats& s = t.stats();
+
+        std::string checks;
+        if (verify) checks += s.mismatches ? "BELLMAN FAILED " : "bellman ok ";
+        if (brute) {
+            U64 bad = kingsBruteForceCheck(t);
+            checks += bad ? "BRUTE FAILED " : "brute ok ";
+        }
+        std::printf("%3d %14llu  wtm %14llu %14llu %14llu %5d ply %8.2f  %s\n",
+                    n, (unsigned long long)s.positions,
+                    (unsigned long long)s.wWin, (unsigned long long)s.wDraw,
+                    (unsigned long long)s.wLoss, s.deepestWhite, s.seconds, checks.c_str());
+        std::printf("%3s %14s  btm %14llu %14llu %14llu %5d ply\n", "", "",
+                    (unsigned long long)s.bWin, (unsigned long long)s.bDraw,
+                    (unsigned long long)s.bLoss, s.deepestBlack);
+        if (s.mismatches)
+            std::printf("      %llu entries disagree with a forward re-derivation\n",
+                        (unsigned long long)s.mismatches);
+
+        auto deepest = [&](const std::vector<Sq>& p, int d, const char* who, bool wtm) {
+            if (!d) { std::printf("      no %s win\n", who); return; }
+            std::string sq;
+            for (int i = 0; i < W; ++i) sq += std::string(" ") + PCW + t.square(p[i]);
+            for (int i = 0; i < B; ++i) sq += std::string(" ") + (char)(PCB | 32) + t.square(p[W + i]);
+            std::printf("      deepest %s win:%s -- %d plies\n", who, sq.c_str(), d);
+            if (line) {
+                std::vector<Sq> wq(p.begin(), p.begin() + W), bq(p.begin() + W, p.end());
+                std::printf("      %s\n", t.line(wq, bq, wtm, cap).c_str());
+            }
+        };
+        deepest(s.posWhite, s.deepestWhite, "White", true);
+        deepest(s.posBlack, s.deepestBlack, "Black", false);
+
+        if (quietCensus) {
+            for (int side = 0; side < 2; ++side) {
+                QuietCensus q;
+                if (!kingsQuietCensus(t, n, W, B, side == 0, q, pw, pb)) break;
+                std::printf("      quiet (%s), %s to move:"
+                            " %llu placements, White wins %llu (%.2f%%),"
+                            " draws %llu (%.2f%%)\n",
+                            (pw == CP_KING && pb == CP_KING)
+                                  ? "no king beside an enemy king"
+                                  : "nothing capturable on the move",
+                            side == 0 ? "White" : "Black",
+                            (unsigned long long)q.total,
+                            (unsigned long long)(side == 0 ? q.win : q.loss),
+                            100.0 * (side == 0 ? q.win : q.loss) / (double)q.total,
+                            (unsigned long long)q.draw,
+                            100.0 * q.draw / (double)q.total);
+            }
+        }
+
+        // The conversions.  Every one of them is an endgame of its own, and
+        // K + K vs K is the one the whole table turns on.
+        for (int w = 1; w <= W; ++w)
+            for (int b = 1; b <= B; ++b) {
+                if (w == W && b == B) continue;
+                const KingsStats& q = t.subStats(w, b);
+                std::printf("      %-3s vs %-3s  wtm %llu/%llu/%llu  btm %llu/%llu/%llu  "
+                            "deepest %d/%d ply\n",
+                            std::string(w, PCW).c_str(), std::string(b, PCB).c_str(),
+                            (unsigned long long)q.wWin, (unsigned long long)q.wDraw,
+                            (unsigned long long)q.wLoss,
+                            (unsigned long long)q.bWin, (unsigned long long)q.bDraw,
+                            (unsigned long long)q.bLoss,
+                            q.deepestWhite, q.deepestBlack);
+            }
+
+        if (!probe.empty()) {
+            std::vector<Sq> sq;
+            std::string curTok;
+            for (char c : probe + ",") {
+                if (c == ',') { if (!curTok.empty()) sq.push_back(t.parse(curTok)); curTok.clear(); }
+                else curTok += c;
+            }
+            if ((int)sq.size() != W + B)
+                std::printf("      --probe needs %d squares: %d white then %d black\n",
+                            W + B, W, B);
+            else {
+                std::vector<Sq> wq(sq.begin(), sq.begin() + W), bq(sq.begin() + W, sq.end());
+                for (int side = 0; side < 2; ++side) {
+                    const bool wtm = side == 0;
+                    int16_t v = t.probe(wq, bq, wtm);
+                    std::printf("      %s to move: ", wtm ? "white" : "black");
+                    if (v == 0) std::printf("draw\n");
+                    else {
+                        const bool moverIsWhite = wtm;
+                        const bool whiteWins = (v > 0) == moverIsWhite;
+                        std::printf("%s wins in %d plies\n", whiteWins ? "White" : "BLACK",
+                                    v > 0 ? v : -v);
+                    }
+                    if (line && v) std::printf("      %s\n", t.line(wq, bq, wtm, cap).c_str());
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+int cmdKqkk(int argc, char** argv) {
+    int lo = 3, hi = 8, show = 2, single = 2;
+    bool wantMates = false, wantSingle = false;
+    bool verify = false, brute = false, progress = false, line = false, hist = false;
+    bool selfcheck = false, stats = false, board = false, rle = false, loose = false;
+    bool sizes = false, capture = false, theorem = false, kvkk = false;
+    std::string probe, out, in;
+    for (int i = 0; i < argc; ++i) {
+        std::string k = argv[i];
+        auto val = [&]() -> std::string { return i + 1 < argc ? argv[++i] : std::string(); };
+        if      (k == "--min")       lo = std::atoi(val().c_str());
+        else if (k == "--max")       hi = std::atoi(val().c_str());
+        else if (k == "-n")          lo = hi = std::atoi(val().c_str());
+        else if (k == "--threads")   gThreads = std::atoi(val().c_str());
+        else if (k == "--loose")     loose = true;
+        else if (k == "--capture")   capture = true;
+        else if (k == "--theorem")   theorem = true;
+        else if (k == "--kvkk")      kvkk = true;
+        else if (k == "--strict")    loose = false;
+        else if (k == "--verify")    verify = true;
+        else if (k == "--brute")     brute = true;
+        else if (k == "--selfcheck") selfcheck = true;
+        else if (k == "--sizes")     sizes = true;
+        else if (k == "--progress")  progress = true;
+        else if (k == "--line")      line = true;
+        else if (k == "--hist")      hist = true;
+        else if (k == "--stats")     stats = true;
+        else if (k == "--board")     board = true;
+        else if (k == "--rle")       rle = true;
+        else if (k == "--mates")   { wantMates = true;
+                                     if (i + 1 < argc && argv[i + 1][0] != '-')
+                                         show = std::atoi(val().c_str()); }
+        else if (k == "--single")  { wantSingle = true;
+                                     if (i + 1 < argc && argv[i + 1][0] != '-')
+                                         single = std::atoi(val().c_str()); }
+        else if (k == "--probe")     probe = val();
+        else if (k == "-o")          out = val();
+        else if (k == "-f")          in = val();
+    }
+    const KkRules rules = loose ? KkRules::Loose : KkRules::Strict;
+    if (capture && kvkk) return capKvKK(lo, hi, progress);
+    if (capture && theorem) {
+        std::printf("the one-king theorem, checked against the ordinary KQK table:\n");
+        const int b = capTheoremCheck(lo, hi, progress);
+        std::printf("%s\n", b ? "THEOREM CHECK FAILED" : "theorem check passed");
+        return b ? 1 : 0;
+    }
+    if (capture)
+        return cmdKqkkCap(lo, hi, verify, brute, progress, stats, line, board,
+                          wantSingle ? single : -1, probe, out, in);
+
+    if (sizes) {
+        // The index alone, without solving anything: what a board would cost.
+        std::printf("%3s %14s %10s %16s %14s\n",
+                    "n", "king triples", "queen sq", "entries/side", "both sides");
+        for (int n = lo; n <= hi; ++n) {
+            Geometry g(n);
+            IndexKQKK ix(g);
+            std::printf("%3d %14llu %10u %16llu %14s\n", n,
+                        (unsigned long long)ix.nblk, ix.npc,
+                        (unsigned long long)ix.nslots,
+                        humanBytes(2.0 * (double)ix.nslots).c_str());
+        }
+        return 0;
+    }
+
+    if (selfcheck) {
+        std::printf("move generator against a naive one, and the table value against\n"
+                    "the definition of its symmetry class, on random placements:\n");
+        const U64 bad = kqkkSelfCheck(lo, hi, 4000, true);
+        std::printf("%s\n", bad ? "SELF-CHECK FAILED" : "self-check passed");
+        return bad ? 1 : 0;
+    }
+
+    if (!in.empty()) {                       // read a table back and report on it
+        auto t = TableKQKK::load(in);
+        kkPrintStats(*t, hist);
+        if (wantMates)  kkMateShapes(*t, show);
+        if (wantSingle) kkSingleMates(*t, single);
+        if (line && t->st.longest.wk >= 0) {
+            std::printf("\ndeepest win, %s:\n", kkDescribe(t->geo, t->st.longest).c_str());
+            if (board) kkBoard(t->geo, t->st.longest);
+            kkPrintLine(*t, t->st.longest, true, 0);
+        }
+        return 0;
+    }
+
+    std::printf("%3s %14s %14s %14s %10s %8s  %s\n", "n", "entries/side",
+                "white wins", "draws", "deepest", "seconds", "checks");
+    int bad = 0;
+    for (int n = lo; n <= hi; ++n) {
+        TableKQKK t(n, rules);
+        t.generate(gThreads, progress);
+        std::string checks;
+        if (verify) {
+            const U64 m = t.verify(gThreads, progress);
+            checks += m ? ("BELLMAN " + std::to_string(m)) : std::string("bellman ok");
+            if (m) ++bad;
+        }
+        if (brute) {
+            const U64 m = kqkkBruteForceCheck(t, progress);
+            if (!checks.empty()) checks += ", ";
+            checks += m ? ("BRUTE " + std::to_string(m)) : std::string("brute ok");
+            if (m) ++bad;
+        }
+        std::printf("%3d %14llu %14llu %14llu %6u ply %8.2f  %s\n", n,
+                    (unsigned long long)t.idx.nslots,
+                    (unsigned long long)t.st.fwWin, (unsigned long long)t.st.fwDraw,
+                    t.st.maxPly, t.st.seconds, checks.c_str());
+        if (t.st.longest.wk >= 0)
+            std::printf("      deepest white win: %s -- mate in %u\n",
+                        kkDescribe(t.geo, t.st.longest).c_str(), (t.st.maxPly + 1) / 2);
+        if (stats) { std::printf("\n"); kkPrintStats(t, hist); std::printf("\n"); }
+        else if (hist) {
+            std::printf("      white-to-move wins by ply (whole board):\n");
+            for (size_t p = 0; p < t.st.histWFull.size(); ++p)
+                if (t.st.histWFull[p])
+                    std::printf("        %3zu ply (mate in %2zu): %llu\n", p, (p + 1) / 2,
+                                (unsigned long long)t.st.histWFull[p]);
+        }
+        if (wantMates)  kkMateShapes(t, show);
+        if (wantSingle) kkSingleMates(t, single);
+        if (!probe.empty()) {
+            std::string f[4]; int k = 0;
+            for (char ch : probe) { if (ch == ',') { if (++k > 3) break; } else f[k] += ch; }
+            PosKK q{ t.geo.parse(f[0]), t.geo.parse(f[1]), t.geo.parse(f[2]), t.geo.parse(f[3]) };
+            std::printf("      probe %s:\n        white to move: %s\n        black to move: %s\n",
+                        kkDescribe(t.geo, q).c_str(),
+                        kkSay(t, q, true).c_str(), kkSay(t, q, false).c_str());
+            if (board) kkBoard(t.geo, q);
+            if (line) {
+                if (isDtm(t.valueAt(q, true)))       kkPrintLine(t, q, true, 8);
+                else if (isDtm(t.valueAt(q, false))) kkPrintLine(t, q, false, 8);
+            }
+        }
+        if (line && probe.empty() && t.st.longest.wk >= 0) {
+            if (board) kkBoard(t.geo, t.st.longest);
+            kkPrintLine(t, t.st.longest, true, 6);
+        }
+        if (!out.empty()) {
+            t.save(out, rle);
+            std::printf("      wrote %s\n", out.c_str());
+        }
+        std::fflush(stdout);
+    }
+    return bad ? 1 : 0;
+}
+
+struct Args {
+    std::string file, out;
+    int n = 0;
+    Pos pos;
+    bool btm = false, rle = false, verify = false, quiet = false, hist = false, board = false;
+    bool probe = false;
+    U64 stride = 1;
+};
+
+Args parse(int argc, char** argv, const Geometry* g) {
+    Args a;
+    for (int i = 0; i < argc; ++i) {
+        std::string k = argv[i];
+        auto val = [&]() -> std::string { return i + 1 < argc ? argv[++i] : std::string(); };
+        auto sqv = [&](Sq& dst) { std::string v = val(); if (g) dst = g->parse(v); };
+        if      (k == "-n")         a.n = std::atoi(val().c_str());
+        else if (k == "-o")         a.out = val();
+        else if (k == "-f")         a.file = val();
+        else if (k == "--threads")  gThreads = std::atoi(val().c_str());
+        else if (k == "--stride")   a.stride = std::strtoull(val().c_str(), nullptr, 10);
+        else if (k == "--btm")      a.btm = true;
+        else if (k == "--rle")      a.rle = true;
+        else if (k == "--verify")   a.verify = true;
+        else if (k == "--quiet")    a.quiet = true;
+        else if (k == "--hist")     a.hist = true;
+        else if (k == "--board")    a.board = true;
+        else if (k == "--probe")    a.probe = true;
+        else if (k == "--rook")     gEndgame = Endgame::KRK;
+        else if (k == "--queen")    gEndgame = Endgame::KQK;
+        else if (k == "--bishops")  gEndgame = Endgame::KBBK;
+        else if (k == "--bishopknight" || k == "--kbnk") gEndgame = Endgame::KBNK;
+        else if (k == "--knights" || k == "--knnk")  gEndgame = Endgame::KNNK;
+        else if (k == "--knnnk")                     gEndgame = Endgame::KNNNK;
+        else if (k == "--no-sub")                    gNoSub = true;
+        else if (k == "--scratch")                   gScratchDir = val();
+        else if (k == "--capture" || k == "--stalemate-loss") gStaleLoss = true;
+        else if (k == "--endgame" || k == "--piece" || k == "-p") {
+            std::string v = val();
+            if (!parseEndgame(v, gEndgame)) {
+                std::fprintf(stderr, "error: --endgame takes kqk, krk, kbbk, "
+                                     "kbnk, knnk or knnnk\n");
+                std::exit(1);
+            }
+        }
+        else if (k == "--wk")       sqv(a.pos.wk);
+        else if (k == "--bk")       sqv(a.pos.bk);
+        else if (k == "--wq" || k == "--wr" || k == "--wb" ||
+                 k == "--wp1" || k == "--wb1") sqv(a.pos.wp[0]);
+        else if (k == "--wn" || k == "--wp2" || k == "--wb2" ||
+                 k == "--wn2") sqv(a.pos.wp[1]);
+        else if (k == "--wp3" || k == "--wn3") sqv(a.pos.wp[2]);
+    }
+    return a;
+}
+
+std::unique_ptr<Table> openTable(int argc, char** argv) {
+    Args pre = parse(argc, argv, nullptr);
+    if (pre.file.empty()) { std::fprintf(stderr, "error: -f FILE is required\n"); std::exit(1); }
+    return Table::load(pre.file);
+}
+
+const char* outcomeName(Outcome o) {
+    switch (o) {
+        case Outcome::Win:  return "white wins";
+        case Outcome::Loss: return "black is lost";
+        case Outcome::Draw: return "draw";
+        default:            return "illegal position";
+    }
+}
+
+// One ply, in a notation that stays unambiguous when White has two like
+// pieces: those get written from-square and to-square, e.g. "Bc1-d2".
+std::string plyText(const Geometry& g, const Material& m, const Pos& before,
+                    const Move& mv, bool whiteToMove) {
+    std::string s;
+    if (whiteToMove) {
+        if (mv.after.wk != before.wk) return "K" + g.name(mv.after.wk);
+        for (int i = 0; i < m.np; ++i)
+            if (mv.after.wp[i] != before.wp[i]) {
+                s += m.letter(i);
+                if (m.np > 1) s += g.name(before.wp[i]) + "-";
+                s += g.name(mv.after.wp[i]);
+                return s;
+            }
+        return "--";
+    }
+    s = "K";
+    if (mv.captured >= 0) s += "x";
+    s += g.name(mv.after.bk);
+    return s;
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    // Running as `krk` or `kbbk` picks that endgame by default; under the
+    // binary's own name `egtb`, or as `kqk`, it stays KQK.  --endgame wins.
+    if (argc > 0 && argv[0]) {
+        std::string prog = argv[0];
+        size_t slash = prog.find_last_of('/');
+        if (slash != std::string::npos) prog = prog.substr(slash + 1);
+        if (prog.find("kbbk") != std::string::npos)      gEndgame = Endgame::KBBK;
+        else if (prog.find("knnnk") != std::string::npos) gEndgame = Endgame::KNNNK;
+        else if (prog.find("knnk") != std::string::npos) gEndgame = Endgame::KNNK;
+        else if (prog.find("kbnk") != std::string::npos) gEndgame = Endgame::KBNK;
+        else if (prog.find("krk")  != std::string::npos) gEndgame = Endgame::KRK;
+        else if (prog.find("kqk")  != std::string::npos) gEndgame = Endgame::KQK;
+    }
+    if (argc < 2) { usage(); return 1; }
+    std::string cmd = argv[1];
+    int rest = argc - 2;
+    char** rv = argv + 2;
+
+    try {
+        if (cmd == "gen") {
+            Args a = parse(rest, rv, nullptr);
+            if (refuseArmed()) return 1;
+            if (a.n < 3) { std::fprintf(stderr, "error: -n N with N >= 3 is required\n"); return 1; }
+            Table t(a.n, gEndgame);
+            t.stalemateLoss = gStaleLoss;
+            // Square names cannot be parsed until the board size is known, and
+            // `gen` learns it from the same argument list, so the position for
+            // --probe is read on a second pass with the geometry in hand.
+            if (a.probe) a.pos = parse(rest, rv, &t.geo).pos;
+            if (!a.quiet)
+                std::fprintf(stderr, "generating %dx%d %s: %llu king pairs, %llu entries/side,"
+                                     " %s RAM, %d threads\n",
+                             a.n, a.n, t.mat.name(), (unsigned long long)t.idx.nkk,
+                             (unsigned long long)t.idx.nslots,
+                             humanBytes(2.0 * (double)t.idx.nslots).c_str(), gThreads);
+            auto sub = attachSub(t, gThreads, !a.quiet);
+            auto t0 = std::chrono::steady_clock::now();
+            t.generate(gThreads, !a.quiet);
+            double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            printStats(t, a.hist);
+            std::printf("\ngenerated in %.2f s (%.1f M entries/s)\n", secs,
+                        2.0 * (double)t.idx.nslots / secs / 1e6);
+            if (a.verify) {
+                U64 bad = t.verify(gThreads, a.stride, true);
+                std::printf("verification: %llu mismatches -- %s\n",
+                            (unsigned long long)bad, bad ? "FAILED" : "table is consistent");
+                if (bad) return 1;
+            }
+            if (!a.out.empty()) {
+                t.save(a.out, a.rle);
+                std::printf("wrote %s\n", a.out.c_str());
+            }
+            // --probe queries a position from the table just built, without
+            // writing it out first.  Past about 10 GiB a table costs as much
+            // disk to store as to build against, so `gen -o` then `probe -f`
+            // stops being possible long before the table stops being buildable.
+            if (a.probe) {
+                ProbeResult r = t.probe(a.pos, !a.btm);
+                std::printf("%s, %s to move: %s", describe(t.geo, t.mat, a.pos).c_str(),
+                            a.btm ? "black" : "white", outcomeName(r.outcome));
+                if (r.plies >= 0) std::printf(", mate in %d (%d plies)", r.moves, r.plies);
+                std::printf("\n");
+                if (a.board) { std::printf("\n"); printBoard(t.geo, t.mat, a.pos); }
+            }
+            return 0;
+        }
+
+        if (cmd == "stats") {
+            auto t = openTable(rest, rv);
+            Args a = parse(rest, rv, &t->geo);
+            printStats(*t, a.hist);
+            return 0;
+        }
+
+        if (cmd == "verify") {
+            auto t = openTable(rest, rv);
+            Args a = parse(rest, rv, &t->geo);
+            U64 bad = t->verify(gThreads, a.stride, true);
+            std::printf("%llu mismatches -- %s\n", (unsigned long long)bad,
+                        bad ? "FAILED" : "table is consistent");
+            return bad ? 1 : 0;
+        }
+
+        if (cmd == "probe" || cmd == "line" || cmd == "longest") {
+            auto t = openTable(rest, rv);
+            Args a = parse(rest, rv, &t->geo);
+            const Material& m = t->mat;
+            if (cmd == "longest") { a.pos = t->st.longest; a.btm = false; }
+            bool haveAll = a.pos.wk >= 0 && a.pos.bk >= 0;
+            for (int i = 0; i < m.np; ++i) if (a.pos.wp[i] < 0) haveAll = false;
+            if (!haveAll) {
+                std::fprintf(stderr, "error: --wk, --bk and");
+                for (int i = 0; i < m.np; ++i) std::fprintf(stderr, " --%s", m.label(i).c_str());
+                std::fprintf(stderr, " are required\n");
+                return 1;
+            }
+            ProbeResult r = t->probe(a.pos, !a.btm);
+            std::printf("%s, %s to move: %s", describe(t->geo, m, a.pos).c_str(),
+                        a.btm ? "black" : "white", outcomeName(r.outcome));
+            if (r.plies >= 0) std::printf(", mate in %d (%d plies)", r.moves, r.plies);
+            std::printf("\n");
+            if (a.board) { std::printf("\n"); printBoard(t->geo, m, a.pos); }
+
+            if (cmd == "line" || cmd == "longest") {
+                auto pv = t->principalVariation(a.pos, !a.btm);
+                if (pv.empty()) { std::printf("\nno forced line from here\n"); return 0; }
+                Pos cur = a.pos;
+                bool wtm = !a.btm;
+                int moveNo = 1;
+                std::string line;
+                if (!wtm) line = "1... ";
+                for (const Move& mv : pv) {
+                    if (wtm) line += std::to_string(moveNo) + ". ";
+                    line += plyText(t->geo, m, cur, mv, wtm);
+                    if (!wtm) ++moveNo;
+                    cur = mv.after;
+                    wtm = !wtm;
+                    if (t->valueAt(cur, wtm) == 0) line += "#";
+                    line += " ";
+                    if (line.size() % 78 < 10 && wtm) line += "\n";
+                }
+                std::printf("\noptimal line (%zu plies):\n%s\n", pv.size(), line.c_str());
+                if (a.board) { std::printf("\nfinal position:\n"); printBoard(t->geo, m, cur); }
+            }
+            return 0;
+        }
+
+        if (cmd == "selftest")   return cmdSelftest(rest, rv);
+        if (cmd == "sizes")      { parse(rest, rv, nullptr); return cmdSizes(rest, rv); }
+        if (cmd == "bruteforce") {
+            int n = parse(rest, rv, nullptr).n;
+            return refuseArmed() ? 1 : cmdBrute(n);
+        }
+        if (cmd == "policy")     return cmdPolicy(rest, rv);
+        if (cmd == "bishops")    { parse(rest, rv, nullptr); return cmdBishops(rest, rv); }
+        if (cmd == "kqkr")       return cmdKqkr(rest, rv);
+        if (cmd == "kqkbb")      return cmdKqkbb(rest, rv);
+        if (cmd == "kqkk")       return cmdKqkk(rest, rv);
+        if (cmd == "knnnk")      return cmdKnnnk(rest, rv);
+        if (cmd == "kings")      return cmdKings(rest, rv);
+        if (cmd == "rooks")      return cmdKings(rest, rv, true);
+        if (cmd == "mixed")      return cmdMixed(rest, rv);
+
+        usage();
+        return 1;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "error: %s\n", e.what());
+        return 1;
+    }
+}

@@ -1,0 +1,40 @@
+endgame               KQKK  (white has a queen, black has two kings)
+rules                 strict -- black may not leave either king attacked
+board                 14 x 14
+king triples (canon.)         430443
+queen squares                    196   per king triple
+entries per side            84366828   (160.92 MiB in RAM for both sides)
+
+-- symmetry classes ------------------------------------------
+white to move   legal       50985542   win       50985542   draw            0
+black to move   legal       82983843  loss       76555370   draw      6428473
+           double mate        2135999  stalemate    528307   queen en prise  5900166
+     of those stalemates,   527904 have one king mated and the other free
+
+-- whole board (no symmetry reduction) -----------------------
+white to move   legal      407855064   win      407855064   draw            0
+black to move   legal      663821184  loss      612404048   draw     51417136
+           double mate       17081788  stalemate   4221268   queen en prise 47195868
+     of those stalemates,  4218088 have one king mated and the other free
+
+white to move: 100.00% won, 0.00% drawn
+longest win  21 plies = mate in 11
+  example    wK=a1 wQ=a8 bK=i9 bK=j9, white to move
+
+mate-in-N distribution (white to move, whole board)
+  mate in   1         205096280  (25639500 classes)
+  mate in   2         130749448  (16343987 classes)
+  mate in   3          56620616  (7078160 classes)
+  mate in   4           9143212  (1143066 classes)
+  mate in   5           2562128  (320354 classes)
+  mate in   6           1654076  (206793 classes)
+  mate in   7            970996  (121376 classes)
+  mate in   8            688452  (86072 classes)
+  mate in   9            305080  (38135 classes)
+  mate in  10             64288  (8038 classes)
+  mate in  11               488  (61 classes)
+
+      17081788 mating placements: kings side by side 0.1%, both on the rim 6.6%,
+      neither on the rim 53.9%, one in a corner 4.2%
+      the white king's part: defends the queen 3.7%, stands beside a flight square 13.6%,
+      neither -- the queen mates both kings alone -- 84.0%

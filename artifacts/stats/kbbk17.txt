@@ -1,0 +1,65 @@
+endgame               KBBK  (white has two bishops)
+board                 17 x 17
+king pairs (canonical)         10260
+piece placements               41616   per king pair
+entries per side           426980160   (814.40 MiB in RAM for both sides)
+
+-- symmetry classes ------------------------------------------
+white to move   legal      359042596   win      178977832   draw    180064764
+black to move   legal      416184660  loss      198442589   draw    217742071
+                 mate           1829  stalemate     15305   bishop en prise 19226605
+
+-- whole board (no symmetry reduction) -----------------------
+white to move   legal     2872159952   win     1431796000   draw   1440363952
+black to move   legal     3329245920  loss     1587519964   draw   1741725956
+                 mate          14632  stalemate    122260   bishop en prise 153796484
+
+longest win  87 plies = mate in 44
+  example    wK=a1 wB1=a4 wB2=j6 bK=j7, white to move
+
+mate-in-N distribution (white to move, whole board)
+  mate in   1            155956  (19498 classes)
+  mate in   2             33480  (4185 classes)
+  mate in   3            348264  (43533 classes)
+  mate in   4            326992  (40874 classes)
+  mate in   5            710456  (88807 classes)
+  mate in   6            554952  (69369 classes)
+  mate in   7            910520  (113815 classes)
+  mate in   8            910640  (113830 classes)
+  mate in   9           1475888  (184486 classes)
+  mate in  10           2482680  (310335 classes)
+  mate in  11           3049640  (381205 classes)
+  mate in  12           4648352  (581044 classes)
+  mate in  13           6187392  (773424 classes)
+  mate in  14           7800144  (975018 classes)
+  mate in  15          11102080  (1387760 classes)
+  mate in  16          13507896  (1688487 classes)
+  mate in  17          17183640  (2147955 classes)
+  mate in  18          21669800  (2708725 classes)
+  mate in  19          27548288  (3443565 classes)
+  mate in  20          32443676  (4055469 classes)
+  mate in  21          39461908  (4932773 classes)
+  mate in  22          45171440  (5646461 classes)
+  mate in  23          51832068  (6479063 classes)
+  mate in  24          56954324  (7119333 classes)
+  mate in  25          61913244  (7739222 classes)
+  mate in  26          65301920  (8162806 classes)
+  mate in  27          70458860  (8807449 classes)
+  mate in  28          74176796  (9272187 classes)
+  mate in  29          76819984  (9602623 classes)
+  mate in  30          79880224  (9985146 classes)
+  mate in  31          82248592  (10281227 classes)
+  mate in  32          81220220  (10152698 classes)
+  mate in  33          77761732  (9720399 classes)
+  mate in  34          73861464  (9232898 classes)
+  mate in  35          68642692  (8580568 classes)
+  mate in  36          65921464  (8240494 classes)
+  mate in  37          57961820  (7245514 classes)
+  mate in  38          50909760  (6363988 classes)
+  mate in  39          40871884  (5109231 classes)
+  mate in  40          29341992  (3667958 classes)
+  mate in  41          19350772  (2419011 classes)
+  mate in  42           8264712  (1033204 classes)
+  mate in  43            416832  (52125 classes)
+  mate in  44               560  (70 classes)
+

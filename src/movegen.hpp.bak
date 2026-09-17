@@ -1,0 +1,162 @@
+// movegen.hpp -- legal move generation for a bare black king against a white
+// king and one or two long-range pieces.
+//
+// These are the straightforward, readable generators used by initialisation,
+// verification and probing.  The retrograde inner loop in solver.cpp walks the
+// same rays directly, but must agree with these exactly; verify.cpp checks
+// that it does.
+//
+// Each generator is written once, templated on the Endgame, so that the piece
+// count and each piece's move set are compile-time constants: the attack test
+// folds to straight-line arithmetic with no branch on what the piece is.  A
+// runtime dispatcher over the endgames sits in front of each, for the callers
+// that hold a Material rather than a template argument.
+//
+// `p.wp[0 .. np)` are White's non-king pieces.
+#pragma once
+
+#include <type_traits>
+
+#include "geometry.hpp"
+#include "index.hpp"
+
+namespace kqk {
+
+// King steps, as (file, rank) deltas.
+constexpr int KF[8] = {  1,  1,  0, -1, -1, -1,  0,  1 };
+constexpr int KR[8] = {  0,  1,  1,  1,  0, -1, -1, -1 };
+
+// Which of White's pieces stands on `s`, or -1.
+template <Endgame EG>
+inline int pieceOnT(const Pos& p, Sq s) {
+    for (int i = 0; i < npOf(EG); ++i)
+        if (p.wp[i] == s) return i;
+    return -1;
+}
+
+// Is `t` attacked by one of White's pieces?  `ignore` names a piece to leave
+// out of the count -- the one Black is capturing, which is no longer there to
+// defend anything.  A man standing exactly on `t` never blocks a ray to `t`,
+// so it is harmless to keep passing it as a blocker.
+template <Endgame EG>
+inline bool attackedByPieceT(const Geometry& g, const Pos& p, Sq t, int ignore = -1) {
+    constexpr int NP = npOf(EG);
+    if (ignore != 0 && g.attacks(pieceOf(EG, 0), p.wp[0], t, p.wk,
+                                 NP == 2 ? p.wp[1] : Sq(-1)))
+        return true;
+    if constexpr (NP == 2)
+        if (ignore != 1 && g.attacks(pieceOf(EG, 1), p.wp[1], t, p.wk, p.wp[0]))
+            return true;
+    return false;
+}
+
+template <Endgame EG>
+inline bool blackInCheckT(const Geometry& g, const Pos& p) {
+    return attackedByPieceT<EG>(g, p, p.bk);
+}
+
+// All legal white moves from a legal white-to-move position.  fn(after) is
+// called once per move with the resulting placement.  White can never capture:
+// Black has only a king, and kings are not capturable.
+template <Endgame EG, class F>
+inline void genWhiteT(const Geometry& g, const Pos& p, F&& fn) {
+    constexpr int NP = npOf(EG);
+    int kf = g.file(p.wk), kr = g.rank(p.wk);
+    for (int d = 0; d < 8; ++d) {
+        int f = kf + KF[d], r = kr + KR[d];
+        if (!g.onBoard(f, r)) continue;
+        Sq t = g.sq(f, r);
+        if (pieceOnT<EG>(p, t) >= 0) continue;   // one of White's own men in the way
+        if (g.kingsTouch(t, p.bk)) continue;     // would step next to the king
+        Pos q = p;
+        q.wk = t;
+        fn(q);
+    }
+    // One piece at a time.  forEachMove is shared with the retrograde pass, so
+    // the two can never drift apart.  The index is a template argument because
+    // the piece kinds differ per slot in KBNK.
+    auto movePiece = [&](auto Ic) {
+        constexpr int I = decltype(Ic)::value;
+        const Sq other = (NP == 2) ? p.wp[1 - I] : Sq(-1);
+        forEachMove<pieceOf(EG, I)>(g, p.wp[I], p.wk, p.bk, other, [&](Sq t) {
+            Pos q = p;
+            q.wp[I] = t;
+            fn(q);
+            return true;
+        });
+    };
+    movePiece(std::integral_constant<int, 0>{});
+    if constexpr (NP == 2) movePiece(std::integral_constant<int, 1>{});
+}
+
+// All legal black moves from a legal black-to-move position.  fn(to, captured)
+// is called once per move; `captured` is the index of the white piece Black
+// took, or -1.  Every capture leaves material that cannot mate, so it is an
+// immediate draw and lies outside this table -- see the invariant in
+// geometry.hpp.
+template <Endgame EG, class F>
+inline void genBlackT(const Geometry& g, const Pos& p, F&& fn) {
+    int kf = g.file(p.bk), kr = g.rank(p.bk);
+    for (int d = 0; d < 8; ++d) {
+        int f = kf + KF[d], r = kr + KR[d];
+        if (!g.onBoard(f, r)) continue;
+        Sq t = g.sq(f, r);
+        if (g.kingsTouch(t, p.wk)) continue;   // includes t == p.wk
+        int cap = pieceOnT<EG>(p, t);
+        // The moving king is not its own blocker, so its origin is not passed.
+        if (attackedByPieceT<EG>(g, p, t, cap)) continue;
+        fn(t, cap);
+    }
+}
+
+// ---- runtime dispatchers ---------------------------------------------------
+
+inline int pieceOn(const Material& m, const Pos& p, Sq s) {
+#define CALL(EG) pieceOnT<EG>(p, s)
+    KQK_DISPATCH(m.eg, CALL)
+#undef CALL
+}
+
+inline bool attackedByPiece(const Geometry& g, const Material& m, const Pos& p,
+                            Sq t, int ignore = -1) {
+#define CALL(EG) attackedByPieceT<EG>(g, p, t, ignore)
+    KQK_DISPATCH(m.eg, CALL)
+#undef CALL
+}
+
+inline bool blackInCheck(const Geometry& g, const Material& m, const Pos& p) {
+#define CALL(EG) blackInCheckT<EG>(g, p)
+    KQK_DISPATCH(m.eg, CALL)
+#undef CALL
+}
+
+template <class F>
+inline void genWhite(const Geometry& g, const Material& m, const Pos& p, F&& fn) {
+#define CALL(EG) genWhiteT<EG>(g, p, static_cast<F&&>(fn))
+    KQK_DISPATCH(m.eg, CALL)
+#undef CALL
+}
+
+template <class F>
+inline void genBlack(const Geometry& g, const Material& m, const Pos& p, F&& fn) {
+#define CALL(EG) genBlackT<EG>(g, p, static_cast<F&&>(fn))
+    KQK_DISPATCH(m.eg, CALL)
+#undef CALL
+}
+
+// Is the position legal with the given side to move?  The side that is *not*
+// to move may not be in check.  Black has only a king, so a black-to-move
+// position is legal as soon as the men are distinct and the kings do not
+// touch.
+inline bool legalPos(const Geometry& g, const Material& m, const Pos& p, bool whiteToMove) {
+    for (int i = 0; i < m.np; ++i) {
+        if (p.wp[i] == p.wk || p.wp[i] == p.bk) return false;
+        for (int j = i + 1; j < m.np; ++j)
+            if (p.wp[i] == p.wp[j]) return false;
+    }
+    if (g.kingsTouch(p.wk, p.bk)) return false;
+    if (whiteToMove && blackInCheck(g, m, p)) return false;
+    return true;
+}
+
+} // namespace kqk

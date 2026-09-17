@@ -1,0 +1,7 @@
+n,placements_per_king_pair,entries_per_side,table_bytes,peak_memory_bytes,build_seconds,timing,verify,deepest_win_moves
+8,4096,1892352,3784704,5750784,0.15,whole process,full,33
+12,20736,51321600,102643200,105103360,2.55,whole process,full,64
+16,65536,522977280,1045954560,1049559040,26.13,whole process,1-in-101 sample,93
+18,104976,1349151552,2698303104,2703114240,74.24,whole process,1-in-101 sample,112
+19,130321,2093606865,4187213730,4109484032,73.49,whole process,none,90
+21,194481,4674350835,9348701670,5120835584,253.86,whole process,1-in-1009 sample,105

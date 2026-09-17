@@ -1,0 +1,42 @@
+endgame               KRK  (white has a rook)
+board                 10 x 10
+king pairs (canonical)          1170
+piece placements                 100   per king pair
+entries per side              117000   (228.52 KiB in RAM for both sides)
+
+-- symmetry classes ------------------------------------------
+white to move   legal          92904   win          92904   draw            0
+black to move   legal         113040  loss         105441   draw         7599
+                 mate             44  stalemate        11   rook en prise       7588
+
+-- whole board (no symmetry reduction) -----------------------
+white to move   legal         742080   win         742080   draw            0
+black to move   legal         903168  loss         842604   draw        60564
+                 mate            352  stalemate        84   rook en prise      60480
+
+longest win  41 plies = mate in 21
+  example    wK=a1 wR=c3 bK=d4, white to move
+
+mate-in-N distribution (white to move, whole board)
+  mate in   1              3168  (396 classes)
+  mate in   2              9308  (1167 classes)
+  mate in   3              8156  (1023 classes)
+  mate in   4              2860  (358 classes)
+  mate in   5              7904  (989 classes)
+  mate in   6             14564  (1824 classes)
+  mate in   7             17752  (2223 classes)
+  mate in   8             29644  (3709 classes)
+  mate in   9             45592  (5703 classes)
+  mate in  10             53744  (6722 classes)
+  mate in  11             57416  (7182 classes)
+  mate in  12             60548  (7578 classes)
+  mate in  13             75228  (9412 classes)
+  mate in  14             79340  (9931 classes)
+  mate in  15             78640  (9840 classes)
+  mate in  16             72120  (9029 classes)
+  mate in  17             59384  (7442 classes)
+  mate in  18             40908  (5126 classes)
+  mate in  19             21660  (2719 classes)
+  mate in  20              3880  (494 classes)
+  mate in  21               264  (37 classes)
+

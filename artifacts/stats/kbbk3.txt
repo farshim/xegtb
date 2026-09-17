@@ -1,0 +1,22 @@
+endgame               KBBK  (white has two bishops)
+board                 3 x 3
+king pairs (canonical)             5
+piece placements                  36   per king pair
+entries per side                 180   (360.00 B in RAM for both sides)
+
+-- symmetry classes ------------------------------------------
+white to move   legal             45   win              6   draw           39
+black to move   legal             87  loss             11   draw           76
+                 mate              9  stalemate        21   bishop en prise       27
+
+-- whole board (no symmetry reduction) -----------------------
+white to move   legal            340   win             48   draw          292
+black to move   legal            672  loss             88   draw          584
+                 mate             72  stalemate       156   bishop en prise      212
+
+longest win  1 plies = mate in 1
+  example    wK=a1 wB1=b1 wB2=c3 bK=c1, white to move
+
+mate-in-N distribution (white to move, whole board)
+  mate in   1                48  (6 classes)
+

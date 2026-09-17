@@ -1,0 +1,490 @@
+// solver.cpp -- parallel retrograde analysis producing depth-to-mate.
+//
+// Structure of the computation
+// ----------------------------
+// In every endgame this program computes, the value of a position is heavily
+// constrained before any search: Black has a lone king, so Black can never
+// give check, never mate, and never win.  Therefore every white-to-move entry
+// is a win or a draw and every black-to-move entry is a loss or a draw.  The
+// backward induction is correspondingly a strict alternation of two sweeps.
+//
+//   phase A   black-to-move losses at ply d  ->  their white-to-move
+//             predecessors are wins at ply d+1
+//   phase B   white-to-move wins at ply d+1  ->  a black-to-move predecessor
+//             becomes a loss at ply d+2 once *all* of its moves lead to wins
+//
+// Phase B re-tests the predecessor by forward move generation rather than by
+// decrementing a per-position counter of unresolved successors.  The usual
+// counter trick is unsound on a symmetry-reduced index: an edge between two
+// orbits of different size is seen a different number of times from the two
+// ends, so counters would never reach zero for the positions that lie on a
+// symmetry axis.  Black has at most eight moves, so re-testing is cheap, and
+// it removes the counter array entirely -- the table needs only two bytes per
+// symmetry class, one per side to move.
+//
+// Nothing below is specific to a particular piece.  White's men enter only
+// through Geometry (which rays they travel) and through NP, the number of them
+// -- the file is templated on that so the one-piece endgames compile to
+// exactly the code they had before two-piece ones existed.
+//
+// Each phase has disjoint read and write sets (phase A reads the black array
+// and writes the white one, phase B the other way round), so the only races
+// are threads writing the same value to the same byte.  Those are done with
+// relaxed atomics.
+#include "table.hpp"
+
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <thread>
+#include <type_traits>
+
+namespace kqk {
+
+void parallelFor(U64 count, U64 grain, int threads,
+                 const std::function<void(U64, U64, int)>& body) {
+    if (threads < 1) threads = 1;
+    if (grain < 1) grain = 1;
+    std::atomic<U64> next{0};
+    auto worker = [&](int tid) {
+        for (;;) {
+            U64 lo = next.fetch_add(grain, std::memory_order_relaxed);
+            if (lo >= count) break;
+            body(lo, std::min(lo + grain, count), tid);
+        }
+    };
+    std::vector<std::thread> pool;
+    pool.reserve(threads > 0 ? threads - 1 : 0);
+    for (int t = 1; t < threads; ++t) pool.emplace_back(worker, t);
+    worker(0);
+    for (auto& th : pool) th.join();
+}
+
+namespace {
+
+inline U8 aload(const U8* a, U64 i) {
+    return std::atomic_ref<U8>(const_cast<U8&>(a[i])).load(std::memory_order_relaxed);
+}
+inline void astore(U8* a, U64 i, U8 v) {
+    std::atomic_ref<U8>(a[i]).store(v, std::memory_order_relaxed);
+}
+// Claim an unresolved entry.  Two threads can reach the same entry in the
+// same sweep -- from a piece retraction inside the block and a king retraction
+// from a neighbouring one -- and both would write the same value, which is
+// harmless in itself but would decrement the open-entry counter twice.  The
+// exchange makes exactly one of them the writer.
+inline bool aclaim(U8* a, U64 i, U8 v) {
+    U8 expect = V_UNKNOWN;
+    return std::atomic_ref<U8>(a[i]).compare_exchange_strong(
+        expect, v, std::memory_order_relaxed, std::memory_order_relaxed);
+}
+inline U32 aloadU32(const U32* a, U64 i) {
+    return std::atomic_ref<U32>(const_cast<U32&>(a[i])).load(std::memory_order_relaxed);
+}
+inline void asubU32(U32* a, U64 i, U32 v) {
+    std::atomic_ref<U32>(a[i]).fetch_sub(v, std::memory_order_relaxed);
+}
+
+struct Timer {
+    std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+    double s() const {
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    }
+};
+
+// Is `t` attacked by White's pieces standing on `cfg`, with the white king the
+// only other blocker?  The open-coded form of attackedByPiece() for the hot
+// loops, which have the configuration in registers rather than in a Pos.
+// `pk` is a local copy of the piece kinds.  Reading them out of Material
+// inside the loop would stop the compiler hoisting the load: the atomic stores
+// to the value arrays may, as far as it knows, alias the Material.
+template <Endgame EG>
+inline bool cfgAttacks(const Geometry& g, Sq wk, const Sq* cfg, Sq t) {
+    if constexpr (npOf(EG) == 1) return g.attacks(pieceOf(EG, 0), cfg[0], t, wk);
+    else return g.attacks(pieceOf(EG, 0), cfg[0], t, wk, cfg[1]) ||
+                g.attacks(pieceOf(EG, 1), cfg[1], t, wk, cfg[0]);
+}
+
+template <int NP>
+inline bool onCfg(const Sq* cfg, Sq s) {
+    if constexpr (NP == 1) return cfg[0] == s;
+    else return cfg[0] == s || cfg[1] == s;
+}
+
+// Which of White's pieces stands on `s`, or -1.
+template <Endgame EG>
+inline int cfgIndexOf(const Sq* cfg, Sq s) {
+    if (cfg[0] == s) return 0;
+    if constexpr (npOf(EG) == 2) if (cfg[1] == s) return 1;
+    return -1;
+}
+
+// Is White's piece number `captured`, standing on `s`, defended by the other
+// one?  If it is, Black cannot take it and the capture is not a move at all.
+//
+// The white king is deliberately not consulted: every caller has already
+// excluded the squares next to it.  That is why the one-piece endgames need
+// this at all -- with a single piece nothing can defend it, which is what let
+// the original solver treat "the black king steps onto the piece" as a capture
+// without further thought.  With two pieces that shortcut is wrong.
+template <Endgame EG>
+inline bool cfgDefends(const Geometry& g, Sq wk, const Sq* cfg, int captured, Sq s) {
+    if constexpr (npOf(EG) == 1) { (void)g; (void)wk; (void)cfg; (void)captured; (void)s;
+                                   return false; }
+    else return captured == 0 ? g.attacks(pieceOf(EG, 1), cfg[1], s, wk)
+                              : g.attacks(pieceOf(EG, 0), cfg[0], s, wk);
+}
+
+// ---------------------------------------------------------------------------
+template <Endgame EG>
+void generateImpl(Table& T, int threads, bool progress) {
+    constexpr int NP = npOf(EG);
+    const Geometry& g = T.geo;
+    const Index& idx = T.idx;
+    const U32 npc = idx.npc;
+    const U64 nkk = idx.nkk;
+    std::vector<U8>& w = T.w;
+    std::vector<U8>& b = T.b;
+    Timer clock;
+
+    w.assign(idx.nslots, V_DEAD);
+    b.assign(idx.nslots, V_DEAD);
+
+    // Dirty-block maps.  A block is one king pair, i.e. npc consecutive
+    // entries.  Only blocks that received a value at the previous ply need to
+    // be rescanned, which keeps the deep, sparse plies almost free.
+    std::vector<U8> dirtyB(nkk, 0), dirtyBn(nkk, 0), dirtyW(nkk, 0);
+    std::vector<std::vector<U32>> scratch(std::max(1, threads));
+
+    // Number of still-unresolved white-to-move entries per block.  Once a block
+    // hits zero it can never gain anything from another piece-retraction sweep,
+    // so the sweep can be skipped -- and that is where most of the work would
+    // otherwise go, since each piece has O(n) retractions per position.  In the
+    // one-piece endgames every legal white-to-move position is a win, so the
+    // counters drain completely; in KBBK the same-coloured-bishop
+    // configurations never resolve, so they do not, and the optimisation
+    // simply stops firing.  Correctness does not depend on it either way.
+    std::vector<U32> openW(nkk, 0);
+
+    // ---- initialisation ---------------------------------------------------
+    // Marks dead slots, finds mates and stalemates, and settles every position
+    // in which Black can simply take one of White's pieces.
+    std::atomic<U64> mates{0};
+    parallelFor(nkk, 64, threads, [&](U64 lo, U64 hi, int) {
+        U64 localMates = 0;
+        for (U64 kk = lo; kk < hi; ++kk) {
+            Pos p;
+            p.wk = idx.kkWk[kk];
+            p.bk = idx.kkBk[kk];
+            bool blockHasMate = false;
+            U64 base = kk * npc;
+            U32 open = 0;
+            for (U32 pc = 0; pc < npc; ++pc) {
+                idx.decode<EG>(pc, p.wp);
+                if (!idx.cfgLive<EG>(p.wp, p.wk, p.bk)) continue;        // stays V_DEAD
+                if (!idx.cfgIsCanonical<EG>((int32_t)kk, p.wp)) continue;
+                bool check = blackInCheckT<EG>(g, p);
+                w[base + pc] = check ? V_DEAD : V_UNKNOWN;   // black in check: illegal
+                open += !check;
+
+                int nmoves = 0;
+                bool grabsPiece = false;
+                genBlackT<EG>(g, p, [&](Sq, int cap) {
+                    ++nmoves;
+                    if (cap >= 0) grabsPiece = true;
+                });
+                if (grabsPiece)      b[base + pc] = V_DRAW;      // piece en prise
+                else if (nmoves)     b[base + pc] = V_UNKNOWN;
+                else if (check)    { b[base + pc] = 0; ++localMates; blockHasMate = true; }
+                else                 b[base + pc] = V_DRAW;      // stalemate
+            }
+            openW[kk] = open;
+            if (blockHasMate) dirtyB[kk] = 1;
+        }
+        mates.fetch_add(localMates, std::memory_order_relaxed);
+    });
+
+    if (progress)
+        std::fprintf(stderr, "  init: %llu king pairs, %llu mates, %.2fs\n",
+                     (unsigned long long)nkk, (unsigned long long)mates.load(), clock.s());
+
+    // ---- backward induction ----------------------------------------------
+    double tA = 0, tB = 0;
+    U32 d = 0;
+    for (;;) {
+        if (d + 2 > MAX_PLY) {
+            std::fprintf(stderr,
+                         "error: depth to mate exceeds %d plies on a %dx%d board; "
+                         "widen the entry type and rebuild\n", (int)MAX_PLY, T.n, T.n);
+            std::exit(2);
+        }
+        // phase A: losses at ply d push their predecessors to wins at ply d+1
+        std::fill(dirtyW.begin(), dirtyW.end(), 0);
+        double tp0 = clock.s();
+        std::atomic<U64> madeW{0};
+        parallelFor(nkk, 32, threads, [&](U64 lo, U64 hi, int) {
+            U64 local = 0;
+            for (U64 kk = lo; kk < hi; ++kk) {
+                if (!dirtyB[kk]) continue;
+                const Sq wk = idx.kkWk[kk], bk = idx.kkBk[kk];
+                const U8* stab = &idx.kkStab[kk * NSYM];
+                const int  slen = idx.kkStabLen[kk];
+                const U64  base = kk * npc;
+                U8* const  wb = w.data() + base;
+                const U8*  bb = b.data() + base;
+                const U8   dv = (U8)(d + 1);
+                const int  wkf = g.file(wk), wkr = g.rank(wk);
+                bool touched = false;
+                U32  filled = 0;
+                // A private copy of the block's open-entry count.  Other
+                // threads may retract a white king move into this block and
+                // lower the shared counter without this copy seeing it, which
+                // only ever makes the copy an over-estimate -- so reaching
+                // zero here really does mean the block is finished, while a
+                // stale non-zero value costs nothing but one more sweep.
+                U32  blockRemaining = aloadU32(openW.data(), kk);
+                bool blockOpen = blockRemaining != 0;
+                for (U32 pc = 0; pc < npc; ++pc) {
+                    if (aload(bb, pc) != (U8)d) continue;
+                    Sq cfg[MAXWP];
+                    idx.decode<EG>(pc, cfg);
+
+                    // Undo a move of one of White's pieces.  Every piece here
+                    // moves symmetrically, so the squares it could have come
+                    // from are exactly the squares it can move to -- which is
+                    // why this is the same forEachMove the forward generator
+                    // uses, and why the two can never drift apart.  The king
+                    // pair does not change, so every such predecessor stays
+                    // inside this block: the whole walk touches one contiguous
+                    // run of memory.
+                    auto retract = [&](auto Ic) {
+                        constexpr int I = decltype(Ic)::value;
+                        const Sq other = (NP == 2) ? cfg[1 - I] : Sq(-1);
+                        forEachMove<pieceOf(EG, I)>(g, cfg[I], wk, bk, other, [&](Sq from) {
+                            // Re-encode the configuration with piece I put back
+                            // on `from`.  For a single piece that is just the
+                            // square, and saying so explicitly is what keeps the
+                            // one-piece endgames on the register-only path they
+                            // had before two-piece ones existed: going through
+                            // the general array form costs a few percent at
+                            // n = 32.
+                            U32 c;
+                            if constexpr (NP == 1) {
+                                c = (slen == 1) ? (U32)from
+                                                : (U32)idx.canonSquare(stab, slen, from);
+                            } else {
+                                Sq prev[2] = { cfg[0], cfg[1] };
+                                prev[I] = from;
+                                c = (slen == 1) ? (U32)idx.encode<EG>(prev)
+                                                : idx.canonCfg<EG>(stab, slen, prev);
+                            }
+                            if (aload(wb, c) == V_UNKNOWN && aclaim(wb, c, dv)) {
+                                ++local; ++filled;
+                                touched = true;
+                                if (--blockRemaining == 0) { blockOpen = false; return false; }
+                            }
+                            return true;
+                        });
+                    };
+                    if (blockOpen) retract(std::integral_constant<int, 0>{});
+                    if constexpr (NP == 2)
+                        if (blockOpen) retract(std::integral_constant<int, 1>{});
+
+                    // Undo a white king move.  This one does leave the block.
+                    for (int s = 0; s < 8; ++s) {
+                        int f = wkf + KF[s], r = wkr + KR[s];
+                        if (!g.onBoard(f, r)) continue;
+                        Sq from = g.sq(f, r);
+                        if (from == bk || onCfg<NP>(cfg, from)) continue;
+                        U64 t;
+                        int32_t tkk = idx.slotOfKk<EG>(from, bk, cfg, t);
+                        if (tkk < 0) continue;
+                        if (aload(w.data(), t) == V_UNKNOWN && aclaim(w.data(), t, dv)) {
+                            ++local;
+                            asubU32(openW.data(), (U64)tkk, 1);
+                            astore(dirtyW.data(), (U64)tkk, 1);
+                        }
+                    }
+                }
+                if (filled) asubU32(openW.data(), kk, filled);
+                if (touched) astore(dirtyW.data(), kk, 1);
+            }
+            madeW.fetch_add(local, std::memory_order_relaxed);
+        });
+        tA += clock.s() - tp0;
+        if (madeW.load() == 0) break;
+        T.st.maxPly = d + 1;
+
+        // phase B: a black-to-move position is lost once every move it has
+        // leads to a white win.
+        std::fill(dirtyBn.begin(), dirtyBn.end(), 0);
+        double tp1 = clock.s();
+        std::atomic<U64> madeB{0};
+        parallelFor(nkk, 32, threads, [&](U64 lo, U64 hi, int tid) {
+            U64 local = 0;
+            std::vector<U32>& hits = scratch[tid];
+            for (U64 kk = lo; kk < hi; ++kk) {
+                if (!dirtyW[kk]) continue;
+                const Sq wk = idx.kkWk[kk], bk = idx.kkBk[kk];
+                const auto& stabWk = g.triStab[g.triId[wk]];
+                const U8* const sw = stabWk.data();
+                const int lw = (int)stabWk.size();
+                const int32_t* const kkRow = idx.kkRowFor(wk);
+                const U8* const wb = w.data() + kk * npc;
+                const U8  dv = (U8)(d + 1);
+
+                // Collect the configurations that were just won.  Sweeping them
+                // once per black king origin, rather than the other way round,
+                // turns the successor lookups into a handful of monotonically
+                // advancing streams instead of scattered probes.
+                hits.clear();
+                for (U32 pc = 0; pc < npc; ++pc)
+                    if (aload(wb, pc) == dv) hits.push_back(pc);
+                if (hits.empty()) continue;
+
+                const int bkf = g.file(bk), bkr = g.rank(bk);
+                for (int s = 0; s < 8; ++s) {
+                    int pf = bkf + KF[s], pr = bkr + KR[s];
+                    if (!g.onBoard(pf, pr)) continue;
+                    const Sq from = g.sq(pf, pr);            // black king before its move
+                    if (g.kingsTouch(from, wk)) continue;
+
+                    if (lw > 1) {                            // white king on a symmetry axis
+                        for (U32 pc : hits) {
+                            Pos pp;
+                            pp.wk = wk; pp.bk = from;
+                            idx.decode<EG>(pc, pp.wp);
+                            if (onCfg<NP>(pp.wp, from)) continue;
+                            U64 rslot;
+                            int32_t rkk = idx.slotSameWk<EG>(kkRow, sw, lw, from, pp.wp, rslot);
+                            if (rkk < 0 || aload(b.data(), rslot) != V_UNKNOWN) continue;
+                            bool allWin = true; U8 worst = 0; int moves = 0;
+                            genBlackT<EG>(g, pp, [&](Sq to, int cap) {
+                                if (!allWin) return;
+                                ++moves;
+                                if (cap >= 0) { allWin = false; return; }
+                                U64 c;
+                                if (idx.slotSameWk<EG>(kkRow, sw, lw, to, pp.wp, c) < 0) {
+                                    allWin = false; return;
+                                }
+                                U8 v = aload(w.data(), c);
+                                if (!isDtm(v)) { allWin = false; return; }
+                                if (v > worst) worst = v;
+                            });
+                            if (!allWin || !moves) continue;
+                            astore(b.data(), rslot, (U8)(worst + 1));
+                            ++local;
+                            astore(dirtyBn.data(), (U64)rkk, 1);
+                        }
+                        continue;
+                    }
+
+                    const int32_t rkk = kkRow[from];
+                    if (rkk < 0) continue;
+                    U8* const rb = b.data() + (U64)rkk * npc;
+
+                    // Successors of that predecessor: the black king steps back
+                    // out again.  Their blocks depend only on the square, so
+                    // resolve them once for the whole sweep over configurations.
+                    Sq  toSq[8];
+                    const U8* toBase[8];
+                    int nto = 0;
+                    for (int t = 0; t < 8; ++t) {
+                        int tf = pf + KF[t], tr = pr + KR[t];
+                        if (!g.onBoard(tf, tr)) continue;
+                        Sq to = g.sq(tf, tr);
+                        if (g.kingsTouch(to, wk)) continue;
+                        int32_t ck = kkRow[to];
+                        if (ck < 0) continue;
+                        toSq[nto] = to;
+                        toBase[nto] = w.data() + (U64)ck * npc;
+                        ++nto;
+                    }
+
+                    for (U32 pc : hits) {
+                        // Same reason as in phase A: with one piece the
+                        // configuration is a square, and keeping it one lets
+                        // this loop stay in registers.
+                        Sq cfg[MAXWP];
+                        if constexpr (NP == 1) cfg[0] = (Sq)pc;
+                        else idx.decode<EG>(pc, cfg);
+                        if (onCfg<NP>(cfg, from)) continue;   // a piece stands there
+                        if (aload(rb, pc) != V_UNKNOWN) continue;
+                        bool allWin = true; U8 worst = 0; int moves = 0;
+                        for (int i = 0; i < nto; ++i) {
+                            Sq to = toSq[i];
+                            int cap = cfgIndexOf<EG>(cfg, to);
+                            if (cap >= 0) {
+                                // Black would be taking that piece.  Legal only
+                                // if the other one does not defend it; if it
+                                // does, this is no move.  A real capture leaves
+                                // material that cannot mate, hence a draw.
+                                if (cfgDefends<EG>(g, wk, cfg, cap, to)) continue;
+                                allWin = false;
+                                break;
+                            }
+                            if (cfgAttacks<EG>(g, wk, cfg, to)) continue;   // not a legal move
+                            ++moves;
+                            U8 v = aload(toBase[i], pc);
+                            if (!isDtm(v)) { allWin = false; break; }
+                            if (v > worst) worst = v;
+                        }
+                        if (!allWin || !moves) continue;
+                        astore(rb, pc, (U8)(worst + 1));
+                        ++local;
+                        astore(dirtyBn.data(), (U64)rkk, 1);
+                    }
+                }
+            }
+            madeB.fetch_add(local, std::memory_order_relaxed);
+        });
+
+        tB += clock.s() - tp1;
+        if (progress)
+            std::fprintf(stderr, "  ply %3u: %12llu wins   ply %3u: %12llu losses  (%.2fs)\n",
+                         d + 1, (unsigned long long)madeW.load(),
+                         d + 2, (unsigned long long)madeB.load(), clock.s());
+
+        if (madeB.load() == 0) break;
+        dirtyB.swap(dirtyBn);
+        d += 2;
+    }
+
+    // Everything still unresolved is drawn.
+    parallelFor(idx.nslots, 1u << 16, threads, [&](U64 lo, U64 hi, int) {
+        for (U64 i = lo; i < hi; ++i) {
+            if (w[i] == V_UNKNOWN) w[i] = V_DRAW;
+            if (b[i] == V_UNKNOWN) b[i] = V_DRAW;
+        }
+    });
+
+    if (progress)
+        std::fprintf(stderr, "  solved in %.2fs  (phase A %.2fs, phase B %.2fs)\n",
+                     clock.s(), tA, tB);
+}
+
+} // namespace
+
+void Table::generate(int threads, bool progress) {
+    switch (mat.eg) {
+        case Endgame::KQK:  generateImpl<Endgame::KQK>(*this, threads, progress);  break;
+        case Endgame::KRK:  generateImpl<Endgame::KRK>(*this, threads, progress);  break;
+        case Endgame::KBBK: generateImpl<Endgame::KBBK>(*this, threads, progress); break;
+        case Endgame::KBNK: generateImpl<Endgame::KBNK>(*this, threads, progress); break;
+        // KNNK qualifies: the only capture available to Black leaves KNK, and
+        // KNK contains no mate on any board size, so the capture really is an
+        // immediate draw.  KNNNK does not qualify and is not listed here.
+        case Endgame::KNNK: generateImpl<Endgame::KNNK>(*this, threads, progress); break;
+        default:
+            // KQKR: Black is armed, so none of the reasoning this solver rests
+            // on applies.  It has its own, in kqkr.cpp.  KNNNK: a knight
+            // capture leaves KNNK, which is not always drawn, so it needs a
+            // conversion this solver has no notion of; its own is in knnnk.cpp.
+            std::fprintf(stderr, "error: %s cannot be solved by this solver; "
+                                 "use the kqkr command\n", mat.name());
+            std::exit(2);
+    }
+    computeStats(threads);
+}
+
+} // namespace kqk

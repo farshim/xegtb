@@ -1,0 +1,20 @@
+endgame               KNNK  (white has two knights)
+board                 6 x 6
+king pairs (canonical)           135
+piece placements                 630   per king pair
+entries per side               85050   (166.11 KiB in RAM for both sides)
+
+-- symmetry classes ------------------------------------------
+white to move   legal          56073   win             51   draw        56022
+black to move   legal          73035  loss             11   draw        73024
+                 mate             11  stalemate       249   knight en prise    18571
+
+-- whole board (no symmetry reduction) -----------------------
+white to move   legal         447832   win            408   draw       447424
+black to move   legal         583440  loss             88   draw       583352
+                 mate             88  stalemate      1984   knight en prise   148348
+
+longest win  1 plies = mate in 1
+  example    wK=a1 wN1=d2 wN2=e3 bK=c1, white to move
+
+generated in 0.01 s (16.1 M entries/s)

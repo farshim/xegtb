@@ -1,0 +1,42 @@
+endgame               KBNK  (white has a bishop and a knight)
+board                 7 x 7
+king pairs (canonical)           270
+piece placements                2401   per king pair
+entries per side              648270   (1.24 MiB in RAM for both sides)
+
+-- symmetry classes ------------------------------------------
+white to move   legal         423543   win         214104   draw       209439
+black to move   legal         551610  loss         219802   draw       331808
+                 mate             47  stalemate      1072   piece en prise    114327
+
+-- whole board (no symmetry reduction) -----------------------
+white to move   legal        3386624   win        1711800   draw      1674824
+black to move   legal        4410480  loss        1757376   draw      2653104
+                 mate            376  stalemate      8560   piece en prise    913624
+
+longest win  41 plies = mate in 21
+  example    wK=a1 wB=a3 wN=f1 bK=e2, white to move
+
+mate-in-N distribution (white to move, whole board)
+  mate in   1              1324  (166 classes)
+  mate in   2               896  (112 classes)
+  mate in   3              2752  (344 classes)
+  mate in   4             12664  (1583 classes)
+  mate in   5             27948  (3497 classes)
+  mate in   6             27880  (3485 classes)
+  mate in   7             28404  (3557 classes)
+  mate in   8             26240  (3281 classes)
+  mate in   9             32580  (4083 classes)
+  mate in  10             50696  (6339 classes)
+  mate in  11             85672  (10715 classes)
+  mate in  12            132296  (16543 classes)
+  mate in  13            181660  (22723 classes)
+  mate in  14            220500  (27572 classes)
+  mate in  15            236684  (29600 classes)
+  mate in  16            274156  (34288 classes)
+  mate in  17            229168  (28663 classes)
+  mate in  18            106756  (13359 classes)
+  mate in  19             30412  (3805 classes)
+  mate in  20              3032  (379 classes)
+  mate in  21                80  (10 classes)
+

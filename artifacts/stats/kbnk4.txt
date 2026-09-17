@@ -1,0 +1,35 @@
+endgame               KBNK  (white has a bishop and a knight)
+board                 4 x 4
+king pairs (canonical)            21
+piece placements                 256   per king pair
+entries per side                5376   (10.50 KiB in RAM for both sides)
+
+-- symmetry classes ------------------------------------------
+white to move   legal           2281   win           2141   draw          140
+black to move   legal           3552  loss           1947   draw         1605
+                 mate             20  stalemate       153   piece en prise      1312
+
+-- whole board (no symmetry reduction) -----------------------
+white to move   legal          18240   win          17120   draw         1120
+black to move   legal          28392  loss          15560   draw        12832
+                 mate            160  stalemate      1224   piece en prise     10488
+
+longest win  27 plies = mate in 14
+  example    wK=a1 wB=d2 wN=d1 bK=d3, white to move
+
+mate-in-N distribution (white to move, whole board)
+  mate in   1               256  (32 classes)
+  mate in   2               136  (17 classes)
+  mate in   3               504  (63 classes)
+  mate in   4              1192  (149 classes)
+  mate in   5              1440  (180 classes)
+  mate in   6              1960  (245 classes)
+  mate in   7              2180  (273 classes)
+  mate in   8              2916  (365 classes)
+  mate in   9              2912  (364 classes)
+  mate in  10              2536  (317 classes)
+  mate in  11               832  (104 classes)
+  mate in  12               224  (28 classes)
+  mate in  13                24  (3 classes)
+  mate in  14                 8  (1 classes)
+

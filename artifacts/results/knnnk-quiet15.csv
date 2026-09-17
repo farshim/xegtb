@@ -1,0 +1,8 @@
+n,wk,wn1,wn2,wn3,bk,value,quiet,furthest_white_man,note
+15,f5,a1,e5,f6,c3,draw,yes,3,the a1 knight is trapped: b3 and c2 are its only moves and both are attacked by the black king and undefended
+15,f5,a1,d6,f6,c3,draw,yes,3,same trap
+15,f5,a1,f4,f6,c3,draw,yes,3,same trap
+15,e5,a1,f4,f6,c3,draw,yes,3,same trap
+15,f4,a1,e5,f6,c3,draw,yes,3,same trap
+12,f5,a1,e5,f6,c3,draw,yes,3,the same placement is drawn on 12x12 too -- the trap does not depend on board size
+13,f5,a1,e5,f6,c3,draw,yes,3,also drawn on 13x13 -- confirmed through ./kqk gen --probe

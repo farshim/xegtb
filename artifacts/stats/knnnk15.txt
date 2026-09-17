@@ -1,0 +1,22 @@
+K+N+N+N vs K on 15x15 -- built against a mapped file (--scratch), 21.59 GiB
+
+n=15  deepest win 99 plies = mate in 50
+  white to move: 81451649916 legal, 81335868656 won, 115781260 drawn (0.1421% drawn)
+  sampled Bellman re-derivation (1 in 100003): 0 mismatches
+  quiet drawn candidates kept: 716
+  wK f5   wN a1   wN e5   wN f6   bK c3   | furthest man  3 | probe: DRAW | quiet yes
+  wK f5   wN a1   wN d6   wN f6   bK c3   | furthest man  3 | probe: DRAW | quiet yes
+  wK f5   wN a1   wN f4   wN f6   bK c3   | furthest man  3 | probe: DRAW | quiet yes
+  wK e5   wN a1   wN f4   wN f6   bK c3   | furthest man  3 | probe: DRAW | quiet yes
+  wK f4   wN a1   wN e5   wN f6   bK c3   | furthest man  3 | probe: DRAW | quiet yes
+  wK f4   wN a1   wN d6   wN f6   bK c3   | furthest man  3 | probe: DRAW | quiet yes
+  wK e4   wN a1   wN d6   wN f6   bK c3   | furthest man  3 | probe: DRAW | quiet yes
+  wK f3   wN a1   wN e5   wN f6   bK c3   | furthest man  3 | probe: DRAW | quiet yes
+
+-- build log tail --
+  ply  91:      1474819 wins   ply  92:      3063911 losses  (14358.88s)
+  ply  93:       134454 wins   ply  94:       350462 losses  (14528.63s)
+  ply  95:         8740 wins   ply  96:        25373 losses  (14659.74s)
+  ply  97:          335 wins   ply  98:          924 losses  (14682.92s)
+  ply  99:            6 wins   ply 100:           22 losses  (14684.47s)
+  solved in 15036.63s  (phase A 9161.95s, phase B 5212.45s)

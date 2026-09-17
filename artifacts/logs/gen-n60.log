@@ -1,0 +1,128 @@
+generating 60x60 KQK: 1616895 king pairs, 5820822000 entries/side, 10.84 GiB RAM, 8 threads
+  init: 1616895 king pairs, 1918 mates, 30.38s
+  ply   1:       117943 wins   ply   2:         9477 losses  (30.39s)
+  ply   3:       232613 wins   ply   4:       116777 losses  (30.40s)
+  ply   5:       478663 wins   ply   6:        53643 losses  (30.42s)
+  ply   7:       966811 wins   ply   8:       309445 losses  (30.44s)
+  ply   9:      2486287 wins   ply  10:       551707 losses  (30.47s)
+  ply  11:      2670403 wins   ply  12:       771923 losses  (30.50s)
+  ply  13:      6289649 wins   ply  14:      3335156 losses  (30.56s)
+  ply  15:      6373857 wins   ply  16:      3144156 losses  (30.64s)
+  ply  17:     10941115 wins   ply  18:      7403924 losses  (30.76s)
+  ply  19:     10702768 wins   ply  20:      7311715 losses  (30.90s)
+  ply  21:     15116562 wins   ply  22:     11451247 losses  (31.08s)
+  ply  23:     15619375 wins   ply  24:     11671591 losses  (31.29s)
+  ply  25:     20417127 wins   ply  26:     16459087 losses  (31.54s)
+  ply  27:     20436550 wins   ply  28:     16223219 losses  (31.81s)
+  ply  29:     26455877 wins   ply  30:     22262642 losses  (32.14s)
+  ply  31:     26129413 wins   ply  32:     21798276 losses  (32.49s)
+  ply  33:     32268098 wins   ply  34:     27993987 losses  (32.90s)
+  ply  35:     32440701 wins   ply  36:     27989903 losses  (33.35s)
+  ply  37:     38867546 wins   ply  38:     34633606 losses  (33.85s)
+  ply  39:     38453027 wins   ply  40:     34111791 losses  (34.39s)
+  ply  41:     45853133 wins   ply  42:     41695512 losses  (34.99s)
+  ply  43:     45252157 wins   ply  44:     41161633 losses  (35.65s)
+  ply  45:     52365423 wins   ply  46:     48477987 losses  (36.36s)
+  ply  47:     52380546 wins   ply  48:     48575638 losses  (37.11s)
+  ply  49:     59566865 wins   ply  50:     56084479 losses  (37.97s)
+  ply  51:     58951320 wins   ply  52:     55642440 losses  (38.83s)
+  ply  53:     66869316 wins   ply  54:     63816865 losses  (39.78s)
+  ply  55:     66167900 wins   ply  56:     63492284 losses  (40.77s)
+  ply  57:     73439925 wins   ply  58:     70928395 losses  (41.83s)
+  ply  59:     73481626 wins   ply  60:     71468834 losses  (42.97s)
+  ply  61:     80532587 wins   ply  62:     78770768 losses  (44.16s)
+  ply  63:     79974270 wins   ply  64:     78825704 losses  (45.40s)
+  ply  65:     87513953 wins   ply  66:     86510073 losses  (46.73s)
+  ply  67:     86911917 wins   ply  68:     86711704 losses  (48.13s)
+  ply  69:     93501378 wins   ply  70:     93282893 losses  (49.63s)
+  ply  71:     93777399 wins   ply  72:     94417870 losses  (51.16s)
+  ply  73:     99786483 wins   ply  74:    100455459 losses  (52.84s)
+  ply  75:     99556535 wins   ply  76:    101338337 losses  (54.59s)
+  ply  77:    105803230 wins   ply  78:    107312875 losses  (56.46s)
+  ply  79:    105528833 wins   ply  80:    108193942 losses  (58.46s)
+  ply  81:    110565390 wins   ply  82:    113027641 losses  (60.64s)
+  ply  83:    111305529 wins   ply  84:    115139090 losses  (62.89s)
+  ply  85:    115356218 wins   ply  86:    118643542 losses  (65.35s)
+  ply  87:    115738524 wins   ply  88:    120744755 losses  (68.00s)
+  ply  89:    119759830 wins   ply  90:    123943423 losses  (70.75s)
+  ply  91:    120070618 wins   ply  92:    126063877 losses  (73.55s)
+  ply  93:    122660623 wins   ply  94:    127819103 losses  (76.56s)
+  ply  95:    124113329 wins   ply  96:    131353433 losses  (80.25s)
+  ply  97:    125283460 wins   ply  98:    131300974 losses  (83.43s)
+  ply  99:    126570554 wins   ply 100:    134366352 losses  (88.73s)
+  ply 101:    127421592 wins   ply 102:    134200811 losses  (93.49s)
+  ply 103:    128599363 wins   ply 104:    138164232 losses  (97.52s)
+  ply 105:    127828021 wins   ply 106:    135572841 losses  (101.86s)
+  ply 107:    130256307 wins   ply 108:    141301659 losses  (106.00s)
+  ply 109:    127622552 wins   ply 110:    136689263 losses  (109.36s)
+  ply 111:    130110013 wins   ply 112:    142452660 losses  (113.04s)
+  ply 113:    126836288 wins   ply 114:    136925561 losses  (115.97s)
+  ply 115:    129181277 wins   ply 116:    142916576 losses  (119.02s)
+  ply 117:    124039628 wins   ply 118:    134940545 losses  (122.41s)
+  ply 119:    121329639 wins   ply 120:    142759130 losses  (125.39s)
+  ply 121:    113645352 wins   ply 122:    130823245 losses  (128.38s)
+  ply 123:    111437589 wins   ply 124:    132014450 losses  (131.15s)
+  ply 125:     99481059 wins   ply 126:    115210659 losses  (133.46s)
+  ply 127:     97098657 wins   ply 128:    116548357 losses  (135.47s)
+  ply 129:     85529512 wins   ply 130:    100083830 losses  (137.37s)
+  ply 131:     84253618 wins   ply 132:    102384390 losses  (139.27s)
+  ply 133:     72689280 wins   ply 134:     86073730 losses  (140.86s)
+  ply 135:     71405554 wins   ply 136:     88152305 losses  (142.33s)
+  ply 137:     61231559 wins   ply 138:     73517434 losses  (143.69s)
+  ply 139:     59337135 wins   ply 140:     74563505 losses  (144.92s)
+  ply 141:     50014291 wins   ply 142:     61040929 losses  (146.18s)
+  ply 143:     48780553 wins   ply 144:     62567104 losses  (147.29s)
+  ply 145:     39768513 wins   ply 146:     49569696 losses  (148.22s)
+  ply 147:     38578102 wins   ply 148:     50792734 losses  (149.08s)
+  ply 149:     30991090 wins   ply 150:     39689606 losses  (149.88s)
+  ply 151:     29261139 wins   ply 152:     39829300 losses  (150.54s)
+  ply 153:     22839274 wins   ply 154:     30299111 losses  (151.09s)
+  ply 155:     21499071 wins   ply 156:     30561735 losses  (151.58s)
+  ply 157:     15794175 wins   ply 158:     21998276 losses  (151.98s)
+  ply 159:     14524773 wins   ply 160:     21898732 losses  (152.35s)
+  ply 161:      9948526 wins   ply 162:     14940390 losses  (152.63s)
+  ply 163:      8691581 wins   ply 164:     14341325 losses  (152.85s)
+  ply 165:      5546506 wins   ply 166:      9462959 losses  (153.02s)
+  ply 167:      4255634 wins   ply 168:      8194982 losses  (153.14s)
+  ply 169:      2161080 wins   ply 170:      4830331 losses  (153.23s)
+  ply 171:      1070348 wins   ply 172:      3158374 losses  (153.28s)
+  ply 173:       135817 wins   ply 174:       736362 losses  (153.30s)
+  solved in 156.35s  (phase A 56.39s, phase B 66.51s)
+  verified 1453304 positions (stride 4001), 0 mismatches
+board                 60 x 60
+king pairs (canonical)       1616895
+entries per side          5820822000   (10.84 GiB in RAM for both sides)
+
+-- symmetry classes ------------------------------------------
+white to move   legal     5499297724   win     5499297724   draw            0
+black to move   legal     5814559740  loss     5801960962   draw     12598778
+                 mate           1918  stalemate      4165   queen en prise 12594613
+
+-- whole board (no symmetry reduction) -----------------------
+white to move   legal    43994251756   win    43994251756   draw            0
+black to move   legal    46516080968  loss    46415303968   draw    100777000
+                 mate          15340  stalemate     33320   queen en prise 100743680
+
+longest win  173 plies = mate in 87
+  example    wK=0,0 wQ=1,0 bK=31,29, white to move
+
+generated in 163.71 s (71.1 M entries/s)
+verification: 0 mismatches -- table is consistent
+      167.33 real       982.42 user        67.84 sys
+          3432103936  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+            12994941  page reclaims
+                   1  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                7887  voluntary context switches
+             1946787  involuntary context switches
+      10768698202611  instructions retired
+       2885365613343  cycles elapsed
+         11704312328  peak memory footprint

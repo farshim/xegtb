@@ -1,0 +1,45 @@
+endgame               KBBK  (white has two bishops)
+board                 10 x 10
+king pairs (canonical)          1170
+piece placements                4950   per king pair
+entries per side             5791500   (11.05 MiB in RAM for both sides)
+
+-- symmetry classes ------------------------------------------
+white to move   legal        4300566   win        2130477   draw      2170089
+black to move   legal        5476770  loss        2406869   draw      3069901
+                 mate            380  stalemate      2729   bishop en prise   631801
+
+-- whole board (no symmetry reduction) -----------------------
+white to move   legal       34397824   win       17043816   draw     17354008
+black to move   legal       43803648  loss       19254952   draw     24548696
+                 mate           3040  stalemate     21796   bishop en prise  5053960
+
+longest win  47 plies = mate in 24
+  example    wK=a1 wB1=e2 wB2=a5 bK=e3, white to move
+
+mate-in-N distribution (white to move, whole board)
+  mate in   1             16792  (2099 classes)
+  mate in   2              5800  (725 classes)
+  mate in   3             39336  (4917 classes)
+  mate in   4             44608  (5576 classes)
+  mate in   5             78928  (9866 classes)
+  mate in   6             84280  (10535 classes)
+  mate in   7            123432  (15429 classes)
+  mate in   8            171024  (21378 classes)
+  mate in   9            258680  (32335 classes)
+  mate in  10            386888  (48361 classes)
+  mate in  11            548632  (68579 classes)
+  mate in  12            748256  (93532 classes)
+  mate in  13           1025648  (128206 classes)
+  mate in  14           1295456  (161932 classes)
+  mate in  15           1578352  (197294 classes)
+  mate in  16           1767888  (220986 classes)
+  mate in  17           1895608  (236951 classes)
+  mate in  18           1884560  (235570 classes)
+  mate in  19           1753440  (219180 classes)
+  mate in  20           1514632  (189329 classes)
+  mate in  21           1174432  (146804 classes)
+  mate in  22            587600  (73450 classes)
+  mate in  23             59232  (7404 classes)
+  mate in  24               312  (39 classes)
+

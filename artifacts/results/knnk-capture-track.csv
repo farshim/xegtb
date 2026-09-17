@@ -1,0 +1,15 @@
+n,placement,value,moves,plies
+8,wK a1 wN c2 wN c3 bK e5,white wins,20,39
+9,wK a1 wN c2 wN c3 bK e5,white wins,25,49
+10,wK a1 wN c2 wN c3 bK e5,white wins,32,63
+11,wK a1 wN c2 wN c3 bK e5,white wins,41,81
+12,wK a1 wN c2 wN c3 bK e5,white wins,50,99
+13,wK a1 wN c2 wN c3 bK e5,white wins,70,139
+14,wK a1 wN c2 wN c3 bK e5,white wins,103,205
+15,wK a1 wN c2 wN c3 bK e5,draw,,
+16,wK a1 wN c2 wN c3 bK e5,draw,,
+12,wK a1 wN e1 wN c3 bK c1 (quiet),white wins,52,103
+13,wK a1 wN e1 wN c3 bK c1 (quiet),white wins,71,141
+14,wK a1 wN e1 wN c3 bK c1 (quiet),white wins,104,207
+15,wK a1 wN e1 wN c3 bK c1 (quiet),draw,,
+16,wK a1 wN e1 wN c3 bK c1 (quiet),draw,,

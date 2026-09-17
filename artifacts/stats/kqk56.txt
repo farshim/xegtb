@@ -1,0 +1,18 @@
+board                 56 x 56
+king pairs (canonical)       1226610
+entries per side          3846648960   (7.16 GiB in RAM for both sides)
+
+-- symmetry classes ------------------------------------------
+white to move   legal     3619100925   win     3619100925   draw            0
+black to move   legal     3841908840  loss     3832370048   draw      9538792
+                 mate           1678  stalemate      3661   queen en prise 9535131
+
+-- whole board (no symmetry reduction) -----------------------
+white to move   legal    28952702460   win    28952702460   draw            0
+black to move   legal    30734949960  loss    30658651072   draw     76298888
+                 mate          13420  stalemate     29288   queen en prise 76269600
+
+longest win  161 plies = mate in 81
+  example    wK=0,0 wQ=1,0 bK=29,27, white to move
+
+generated in 133.59 s (57.6 M entries/s)

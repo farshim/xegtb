@@ -1,0 +1,417 @@
+// geometry.hpp -- board geometry, D4 symmetry, materials and attack
+// primitives for an n x n board.  Squares are numbered s = rank * n + file,
+// both 0-based.
+//
+// The same geometry serves every endgame this program computes.  They differ
+// in which of the eight rays White's pieces may travel along, and in how many
+// such pieces there are.  D4 maps orthogonal rays to orthogonal rays and
+// diagonal rays to diagonal rays, so the symmetry reduction below is valid for
+// any of them without change.
+#pragma once
+
+#include <algorithm>
+#include <cstdint>
+#include <cstdlib>
+#include <string>
+#include <vector>
+
+namespace kqk {
+
+using Sq  = int32_t;
+using U8  = uint8_t;
+using U16 = uint16_t;
+using U32 = uint32_t;
+using U64 = uint64_t;
+
+// ---------------------------------------------------------------------------
+// Encoding of one table entry.
+//   0 .. MAX_PLY : distance to mate in plies.  Black-to-move entries are
+//                  losses and always even, white-to-move entries are wins and
+//                  always odd.
+//   V_DRAW       : theoretically drawn.
+//   V_UNKNOWN    : not yet resolved (only during generation).
+//   V_DEAD       : slot does not denote a legal, canonical position.
+// ---------------------------------------------------------------------------
+enum : U8 {
+    MAX_PLY   = 250,
+    V_DRAW    = 251,
+    V_UNKNOWN = 252,
+    V_DEAD    = 253,
+};
+
+inline bool isDtm(U8 v) { return v <= MAX_PLY; }
+
+// The eight elements of the dihedral group D4 acting on the board.
+constexpr int NSYM = 8;
+
+// The eight ray directions, as (file, rank) deltas.  Orthogonal and diagonal
+// alternate, so the orthogonal rays are exactly the even indices and the
+// diagonal rays the odd ones.  A rook is a queen that starts at 0 and strides
+// by two; a bishop is one that starts at 1 and strides by two.
+constexpr int DIR_F[8] = {  1,  1,  0, -1, -1, -1,  0,  1 };
+constexpr int DIR_R[8] = {  0,  1,  1,  1,  0, -1, -1, -1 };
+
+// The knight's eight jumps, as (file, rank) deltas.  Like the ray table above
+// this set is D4-invariant, so the symmetry reduction is unaffected.
+constexpr int NF[8] = {  1,  2,  2,  1, -1, -2, -2, -1 };
+constexpr int NR[8] = {  2,  1, -1, -2, -2, -1,  1,  2 };
+
+// White's pieces.  Black always has a bare king.
+enum class Piece : uint8_t { Queen = 0, Rook = 1, Bishop = 2, Knight = 3 };
+
+// Rays, for the three sliders.  Meaningless for a knight, which jumps.
+constexpr bool isSlider(Piece p) { return p != Piece::Knight; }
+constexpr int dirBegin(Piece p) { return p == Piece::Bishop ? 1 : 0; }
+constexpr int dirStep (Piece p) { return p == Piece::Queen  ? 1 : 2; }
+
+inline const char* pieceName(Piece p) {
+    return p == Piece::Rook   ? "rook"
+         : p == Piece::Bishop ? "bishop"
+         : p == Piece::Knight ? "knight"
+                              : "queen";
+}
+inline char pieceLetter(Piece p) {
+    return p == Piece::Rook   ? 'R'
+         : p == Piece::Bishop ? 'B'
+         : p == Piece::Knight ? 'N'
+                              : 'Q';
+}
+
+// At most this many white non-king pieces.
+constexpr int MAXWP = 3;
+
+// ---------------------------------------------------------------------------
+// The endgames.  Every one of them must satisfy the invariant the whole solver
+// rests on: **Black taking any one white piece must leave an immediate draw.**
+//
+//   KQK, KRK   Black takes the piece  -> bare kings.
+//   KBBK       Black takes a bishop   -> KBK, which is also a draw.
+//   KBNK       Black takes the bishop -> KNK, or the knight -> KBK; both drawn.
+//   KNK        Black takes the knight -> bare kings.
+//   KNNK       Black takes a knight   -> KNK, which contains no mate at all --
+//              not merely no *forced* mate: with one knight there is no
+//              placement whatever in which a king is mated, so the position is
+//              dead drawn and the invariant holds in its strongest form.
+//
+// KRRK and KQQK look superficially similar and do *not* qualify: taking one
+// rook leaves KRK, which White wins, so those tables cannot be solved without
+// the table they convert into.
+//
+// KNNNK is the same kind of exception and it is easy to get wrong.  Two
+// knights cannot *force* mate, which tempts one to score a knight capture as
+// an immediate draw -- but "cannot force" is not "cannot".  KNNK contains 120
+// mates on 8x8, so a black king that grabs a knight and lands in a net is
+// still lost, and KNNNK must read its value out of the KNNK table rather than
+// assume it.  It therefore has its own solver, in knnnk.cpp, and appears in
+// this enum only for the geometry and the index codec.
+//
+// KQKR is the one endgame here that deliberately breaks the invariant: Black
+// has a rook, so Black can check, can mate, and taking the queen leaves a
+// position White *loses*.  It therefore does not use the solver in solver.cpp
+// at all -- it has its own, in kqkr.cpp, which handles conversion into the KQK
+// and KRK tables.  It appears in this enum only so that it can share the board
+// geometry and the index codec, both of which care about nothing beyond how
+// many non-king men there are and whether they are alike.
+// ---------------------------------------------------------------------------
+enum class Endgame : uint8_t { KQK = 0, KRK = 1, KBBK = 2, KBNK = 3, KQKR = 4,
+                               KNNK = 5, KNNNK = 6, KNK = 7 };
+constexpr int NUM_ENDGAMES = 8;
+
+// Does Black have a man besides the king?  Only KQKR does, and only the KQKR
+// solver may be used on such an endgame.
+constexpr bool blackArmed(Endgame e) { return e == Endgame::KQKR; }
+
+// Compile-time views of an endgame.  The solver, the index codec and the move
+// generator are all templated on the Endgame and read these, so the piece
+// count, the ray sets and the attack tests fold away to constants.
+constexpr int npOf(Endgame e) {
+    return e == Endgame::KNNNK ? 3
+         : (e == Endgame::KBBK || e == Endgame::KBNK || e == Endgame::KQKR ||
+            e == Endgame::KNNK) ? 2 : 1;
+}
+// For KQKR this reports the queen and the rook in that order; the rook is
+// Black's, which only the KQKR solver needs to know.  The index does not: it
+// asks solely for the count and for whether the two are interchangeable.
+constexpr Piece pieceOf(Endgame e, int i = 0) {
+    return e == Endgame::KRK   ? Piece::Rook
+         : e == Endgame::KBBK  ? Piece::Bishop
+         : e == Endgame::KBNK  ? (i == 0 ? Piece::Bishop : Piece::Knight)
+         : e == Endgame::KQKR  ? (i == 0 ? Piece::Queen  : Piece::Rook)
+         : e == Endgame::KNNK  ? Piece::Knight
+         : e == Endgame::KNNNK ? Piece::Knight
+         : e == Endgame::KNK   ? Piece::Knight
+                               : Piece::Queen;
+}
+// Are White's two pieces interchangeable?  If they are, a configuration is an
+// unordered pair and half the table disappears; if not, it is an ordered one.
+constexpr bool identicalOf(Endgame e) {
+    return e == Endgame::KBBK || e == Endgame::KNNK || e == Endgame::KNNNK;
+}
+
+// Dispatch a call over the endgames, so one templated body serves them all.
+#define KQK_DISPATCH(eg, CALL)                          \
+    switch (eg) {                                       \
+        case Endgame::KQK:  return CALL(Endgame::KQK);  \
+        case Endgame::KRK:  return CALL(Endgame::KRK);  \
+        case Endgame::KBBK: return CALL(Endgame::KBBK); \
+        case Endgame::KBNK: return CALL(Endgame::KBNK); \
+        case Endgame::KNNK: return CALL(Endgame::KNNK); \
+        case Endgame::KNNNK:return CALL(Endgame::KNNNK);\
+        case Endgame::KNK:  return CALL(Endgame::KNK);  \
+        default:            return CALL(Endgame::KQKR); \
+    }
+
+struct Material {
+    Endgame eg = Endgame::KQK;
+    int     np = 1;                                  // white non-king pieces
+    Piece   piece[MAXWP] = { Piece::Queen, Piece::Queen, Piece::Queen };
+    bool    identical = false;                       // np == 2, same type: an unordered pair
+
+    static Material of(Endgame e) {
+        Material m;
+        m.eg = e;
+        m.np = npOf(e);
+        m.identical = identicalOf(e);
+        for (int i = 0; i < m.np; ++i) m.piece[i] = pieceOf(e, i);
+        return m;
+    }
+
+    const char* name() const {
+        switch (eg) {
+            case Endgame::KRK:  return "KRK";
+            case Endgame::KBBK: return "KBBK";
+            case Endgame::KBNK: return "KBNK";
+            case Endgame::KQKR: return "KQKR";
+            case Endgame::KNNK: return "KNNK";
+            case Endgame::KNNNK:return "KNNNK";
+            case Endgame::KNK:  return "KNK";
+            default:            return "KQK";
+        }
+    }
+    const char* have() const {
+        switch (eg) {
+            case Endgame::KRK:  return "white has a rook";
+            case Endgame::KBBK: return "white has two bishops";
+            case Endgame::KBNK: return "white has a bishop and a knight";
+            case Endgame::KQKR: return "white has a queen, black a rook";
+            case Endgame::KNNK: return "white has two knights";
+            case Endgame::KNNNK:return "white has three knights";
+            case Endgame::KNK:  return "white has a knight";
+            default:            return "white has a queen";
+        }
+    }
+    char letter(int i) const { return pieceLetter(piece[i]); }
+    // The label a square of piece i is printed and parsed under: wQ, wR, wB1,
+    // wB2, wB, wN.  Only like pieces need the number.
+    std::string label(int i) const {
+        std::string s = (blackArmed(eg) && i == 1) ? "b" : "w";
+        s += letter(i);
+        if (np > 1 && identical) s += char('1' + i);
+        return s;
+    }
+};
+
+inline bool parseEndgame(const std::string& t, Endgame& out) {
+    std::string v;
+    for (char c : t) v += char(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+    if (v == "kqk"  || v == "queen"   || v == "q")  { out = Endgame::KQK;  return true; }
+    if (v == "krk"  || v == "rook"    || v == "r")  { out = Endgame::KRK;  return true; }
+    if (v == "kbbk" || v == "bishops" || v == "bb") { out = Endgame::KBBK; return true; }
+    if (v == "kbnk" || v == "bn")                   { out = Endgame::KBNK; return true; }
+    if (v == "knnk" || v == "nn")                   { out = Endgame::KNNK; return true; }
+    if (v == "knnnk"|| v == "nnn")                  { out = Endgame::KNNNK;return true; }
+    if (v == "knk"  || v == "n")                    { out = Endgame::KNK;  return true; }
+    return false;
+}
+
+class Geometry {
+public:
+    int n   = 0;   // board edge length
+    int nsq = 0;   // n * n
+
+    // symTab[g * nsq + s] is the image of square s under symmetry g.
+    std::vector<Sq> symTab;
+
+    // triId[s] >= 0 exactly when s lies in the fundamental triangle of D4.
+    std::vector<int32_t> triId;
+    std::vector<Sq>      triSq;    // inverse of triId
+
+    // For each triangle square, the elements of D4 that fix it.  Element 0
+    // (the identity) is always present and always comes first.
+    std::vector<std::vector<U8>> triStab;
+
+    // For each square, the elements of D4 that carry it into the fundamental
+    // triangle.  There is exactly one for a square off every symmetry axis,
+    // which is the overwhelmingly common case, so canonicalisation is usually
+    // three table lookups rather than a loop over the whole group.
+    std::vector<U8> canonSym;      // NSYM entries per square
+    std::vector<U8> canonSymLen;
+
+    explicit Geometry(int edge) : n(edge), nsq(edge * edge) {
+        buildSymmetry();
+        buildTriangle();
+    }
+
+    inline int file(Sq s) const { return s % n; }
+    inline int rank(Sq s) const { return s / n; }
+    inline Sq  sq(int f, int r) const { return r * n + f; }
+    inline bool onBoard(int f, int r) const {
+        return (unsigned)f < (unsigned)n && (unsigned)r < (unsigned)n;
+    }
+    inline Sq image(int g, Sq s) const { return symTab[(size_t)g * nsq + s]; }
+    // Square colour.  Bishops never leave their own colour, which is why two
+    // same-coloured bishops cannot mate -- a fact this program computes rather
+    // than assumes.
+    inline int colour(Sq s) const { return (file(s) + rank(s)) & 1; }
+
+    // True when two kings stand on the same or on touching squares, i.e. when
+    // the pair is illegal.
+    inline bool kingsTouch(Sq a, Sq b) const {
+        int df = file(a) - file(b), dr = rank(a) - rank(b);
+        return df >= -1 && df <= 1 && dr >= -1 && dr <= 1;
+    }
+
+    // Does a piece of the given kind on `from` attack `to`, given that `blk0`
+    // and `blk1` are the only men that can stand in the way?  The relation is
+    // symmetric in from/to.  O(1): with a bounded number of candidate
+    // blockers, "is it strictly between" is just arithmetic on the ray
+    // parameter, so no ray is ever walked.
+    inline bool attacks(Piece p, Sq from, Sq to, Sq blk0, Sq blk1 = -1) const {
+        if (from == to) return false;
+        int ff = file(from), fr = rank(from);
+        int df = file(to) - ff, dr = rank(to) - fr;
+        if (p == Piece::Knight) {                   // jumps; nothing can block
+            int a = df < 0 ? -df : df, b = dr < 0 ? -dr : dr;
+            return (a == 1 && b == 2) || (a == 2 && b == 1);
+        }
+        bool orth = (df == 0 || dr == 0);
+        bool diag = (df == dr || df == -dr);        // from != to, so never both
+        if (orth) { if (p == Piece::Bishop) return false; }
+        else if (diag) { if (p == Piece::Rook) return false; }
+        else return false;
+        int sf = (df > 0) - (df < 0), sr = (dr > 0) - (dr < 0);
+        int steps = df ? (df > 0 ? df : -df) : (dr > 0 ? dr : -dr);
+        return !between(ff, fr, sf, sr, steps, blk0) &&
+               !between(ff, fr, sf, sr, steps, blk1);
+    }
+
+    // ---- square names -----------------------------------------------------
+    // Algebraic ("d4") while n <= 26, otherwise "file,rank" with 0-based
+    // coordinates.  Parsing accepts either form on any board size.
+    std::string name(Sq s) const {
+        if (s < 0 || s >= nsq) return "??";
+        if (n <= 26) return std::string(1, char('a' + file(s))) + std::to_string(rank(s) + 1);
+        return std::to_string(file(s)) + "," + std::to_string(rank(s));
+    }
+
+    Sq parse(const std::string& t) const {
+        if (t.empty()) return -1;
+        auto comma = t.find(',');
+        if (comma != std::string::npos) {
+            int f = std::atoi(t.substr(0, comma).c_str());
+            int r = std::atoi(t.substr(comma + 1).c_str());
+            return onBoard(f, r) ? sq(f, r) : -1;
+        }
+        char c = t[0];
+        if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
+        if (c < 'a' || c > 'z') return -1;
+        int f = c - 'a';
+        int r = std::atoi(t.c_str() + 1) - 1;
+        return onBoard(f, r) ? sq(f, r) : -1;
+    }
+
+private:
+    // Does `blk` sit strictly between the ray origin and a point `steps` along it?
+    inline bool between(int ff, int fr, int sf, int sr, int steps, Sq blk) const {
+        if (blk < 0) return false;
+        int bdf = file(blk) - ff, bdr = rank(blk) - fr;
+        int k = sf ? bdf * sf : bdr * sr;
+        return k > 0 && k < steps && bdf == sf * k && bdr == sr * k;
+    }
+
+    void buildSymmetry() {
+        symTab.assign((size_t)NSYM * nsq, 0);
+        for (int r = 0; r < n; ++r)
+            for (int f = 0; f < n; ++f) {
+                Sq s = sq(f, r);
+                int mf = n - 1 - f, mr = n - 1 - r;
+                Sq img[NSYM] = {
+                    sq(f,  r),   // identity
+                    sq(mf, r),   // mirror files
+                    sq(f,  mr),  // mirror ranks
+                    sq(mf, mr),  // rotate 180
+                    sq(r,  f),   // transpose (reflect in the a1-h8 diagonal)
+                    sq(mr, f),   // rotate 90
+                    sq(r,  mf),  // rotate 270
+                    sq(mr, mf),  // anti-transpose
+                };
+                for (int g = 0; g < NSYM; ++g) symTab[(size_t)g * nsq + s] = img[g];
+            }
+    }
+
+    // The fundamental domain of D4: the closed triangle { 2f <= n-1,
+    // 2r <= n-1, r <= f }.  Every D4 orbit of squares meets it exactly once.
+    void buildTriangle() {
+        triId.assign(nsq, -1);
+        triSq.clear();
+        for (int r = 0; r < n; ++r)
+            for (int f = 0; f < n; ++f) {
+                if (2 * f <= n - 1 && 2 * r <= n - 1 && r <= f) {
+                    triId[sq(f, r)] = (int32_t)triSq.size();
+                    triSq.push_back(sq(f, r));
+                }
+            }
+        triStab.assign(triSq.size(), {});
+        for (size_t i = 0; i < triSq.size(); ++i)
+            for (int g = 0; g < NSYM; ++g)
+                if (image(g, triSq[i]) == triSq[i]) triStab[i].push_back((U8)g);
+
+        canonSym.assign((size_t)nsq * NSYM, 0);
+        canonSymLen.assign(nsq, 0);
+        for (Sq s = 0; s < nsq; ++s) {
+            int len = 0;
+            for (int g = 0; g < NSYM; ++g)
+                if (triId[image(g, s)] >= 0) canonSym[(size_t)s * NSYM + len++] = (U8)g;
+            canonSymLen[s] = (U8)len;
+        }
+    }
+};
+
+// Every square a piece of kind P standing on `from` can move to, given that
+// o0, o1 and o2 are the only other men on the board.  `fn(to)` returns false
+// to stop the walk early.
+//
+// Because every piece here moves symmetrically, this doubles as the set of
+// squares the piece could have come *from* to arrive at `from` -- which is
+// exactly what the retrograde pass needs, so the forward generator and the
+// unmove generator are one function rather than two that must be kept in step.
+template <Piece P, class F>
+inline bool forEachMove(const Geometry& g, Sq from, Sq o0, Sq o1, Sq o2, F&& fn) {
+    const int ff = g.file(from), fr = g.rank(from);
+    if constexpr (P == Piece::Knight) {
+        for (int d = 0; d < 8; ++d) {
+            int f = ff + NF[d], r = fr + NR[d];
+            if (!g.onBoard(f, r)) continue;
+            Sq t = g.sq(f, r);
+            if (t == o0 || t == o1 || t == o2) continue;   // occupied
+            if (!fn(t)) return false;
+        }
+    } else {
+        constexpr int begin = dirBegin(P), step = dirStep(P);
+        const int nn = g.n;
+        for (int d = begin; d < 8; d += step) {
+            const int sf = DIR_F[d], sr = DIR_R[d];
+            const int stepSq = sr * nn + sf;
+            int f = ff + sf, r = fr + sr;
+            Sq t = from + stepSq;
+            while ((unsigned)f < (unsigned)nn && (unsigned)r < (unsigned)nn) {
+                if (t == o0 || t == o1 || t == o2) break;  // blocked
+                if (!fn(t)) return false;
+                f += sf; r += sr; t += stepSq;
+            }
+        }
+    }
+    return true;
+}
+
+} // namespace kqk

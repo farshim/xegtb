@@ -1,0 +1,39 @@
+endgame               KQK  (white has a queen)
+board                 14 x 14
+king pairs (canonical)          4641
+piece placements                 196   per king pair
+entries per side              909636   (1.73 MiB in RAM for both sides)
+
+-- symmetry classes ------------------------------------------
+white to move   legal         700167   win         700167   draw            0
+black to move   legal         893256  loss         860597   draw        32659
+                 mate            124  stalemate       301   queen en prise     32358
+
+-- whole board (no symmetry reduction) -----------------------
+white to move   legal        5600192   win        5600192   draw            0
+black to move   legal        7142304  loss        6881560   draw       260744
+                 mate            988  stalemate      2408   queen en prise    258336
+
+longest win  35 plies = mate in 18
+  example    wK=a1 wQ=e1 bK=h7, white to move
+
+mate-in-N distribution (white to move, whole board)
+  mate in   1             13608  (1701 classes)
+  mate in   2             27300  (3418 classes)
+  mate in   3             54320  (6795 classes)
+  mate in   4            126196  (15784 classes)
+  mate in   5            212716  (26598 classes)
+  mate in   6            275336  (34425 classes)
+  mate in   7            413928  (51748 classes)
+  mate in   8            440756  (55109 classes)
+  mate in   9            564000  (70510 classes)
+  mate in  10            558216  (69791 classes)
+  mate in  11            632636  (79090 classes)
+  mate in  12            624712  (78102 classes)
+  mate in  13            615260  (76922 classes)
+  mate in  14            442748  (55354 classes)
+  mate in  15            330856  (41364 classes)
+  mate in  16            190824  (23857 classes)
+  mate in  17             70404  (8802 classes)
+  mate in  18              6376  (797 classes)
+

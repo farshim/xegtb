@@ -1,0 +1,364 @@
+== 1. exhaustive self-test, n = 3..10, the bare-king endgames ==
+   (full Bellman re-derivation of every entry; also a position-by-position
+    comparison against the unreduced solver -- n <= 8 for the one-piece
+    endgames, n <= 6 for KBBK and KBNK, whose arrays grow as n^6.  For
+    KBBK it also checks that bishop colour decides the drawn positions.)
+== KQK: white has a queen ==
+n= 3  pairs=       5  entries/side=          45  maxDTM=  1 plies (mate in 1)  mismatches=0  brute=ok  ok
+n= 4  pairs=      21  entries/side=         336  maxDTM=  7 plies (mate in 4)  mismatches=0  brute=ok  ok
+n= 5  pairs=      63  entries/side=        1575  maxDTM= 11 plies (mate in 6)  mismatches=0  brute=ok  ok
+n= 6  pairs=     135  entries/side=        4860  maxDTM= 13 plies (mate in 7)  mismatches=0  brute=ok  ok
+n= 7  pairs=     270  entries/side=       13230  maxDTM= 15 plies (mate in 8)  mismatches=0  brute=ok  ok
+n= 8  pairs=     462  entries/side=       29568  maxDTM= 19 plies (mate in 10)  mismatches=0  brute=ok  ok
+      8x8 checkmates                364  expected      364  ok
+      8x8 stalemates                872  expected      872  ok
+      8x8 piece en prise          22176  expected    22176  ok
+      8x8 black-to-move draws     23048  expected    23048  ok
+      8x8 deepest win (plies)        19  expected       19  ok
+n= 9  pairs=     770  entries/side=       62370  maxDTM= 21 plies (mate in 11)  mismatches=0  brute=-  ok
+n=10  pairs=    1170  entries/side=      117000  maxDTM= 23 plies (mate in 12)  mismatches=0  brute=-  ok
+
+== KRK: white has a rook ==
+n= 3  pairs=       5  entries/side=          45  maxDTM=  5 plies (mate in 3)  mismatches=0  brute=ok  ok
+n= 4  pairs=      21  entries/side=         336  maxDTM= 13 plies (mate in 7)  mismatches=0  brute=ok  ok
+n= 5  pairs=      63  entries/side=        1575  maxDTM= 19 plies (mate in 10)  mismatches=0  brute=ok  ok
+n= 6  pairs=     135  entries/side=        4860  maxDTM= 23 plies (mate in 12)  mismatches=0  brute=ok  ok
+n= 7  pairs=     270  entries/side=       13230  maxDTM= 27 plies (mate in 14)  mismatches=0  brute=ok  ok
+n= 8  pairs=     462  entries/side=       29568  maxDTM= 31 plies (mate in 16)  mismatches=0  brute=ok  ok
+      8x8 checkmates                216  expected      216  ok
+      8x8 stalemates                 68  expected       68  ok
+      8x8 piece en prise          22176  expected    22176  ok
+      8x8 black-to-move draws     22244  expected    22244  ok
+      8x8 deepest win (plies)        31  expected       31  ok
+n= 9  pairs=     770  entries/side=       62370  maxDTM= 35 plies (mate in 18)  mismatches=0  brute=-  ok
+n=10  pairs=    1170  entries/side=      117000  maxDTM= 41 plies (mate in 21)  mismatches=0  brute=-  ok
+
+== KBBK: white has two bishops ==
+n= 3  pairs=       5  entries/side=         180  maxDTM=  1 plies (mate in 1)  mismatches=0  brute=ok  ok
+      same-coloured bishops: 196 of 196 white-to-move positions drawn  (all)  ok
+      opposite colours: 96 drawn of 144  ok
+n= 4  pairs=      21  entries/side=        2520  maxDTM= 17 plies (mate in 9)  mismatches=0  brute=ok  ok
+      same-coloured bishops: 4468 of 4468 white-to-move positions drawn  (all)  ok
+      opposite colours: 104 drawn of 3840  ok
+n= 5  pairs=      63  entries/side=       18900  maxDTM= 21 plies (mate in 11)  mismatches=0  brute=ok  ok
+      same-coloured bishops: 38572 of 38572 white-to-move positions drawn  (all)  ok
+      opposite colours: 192 drawn of 35360  ok
+n= 6  pairs=     135  entries/side=       85050  maxDTM= 25 plies (mate in 13)  mismatches=0  brute=ok  ok
+      same-coloured bishops: 204864 of 204864 white-to-move positions drawn  (all)  ok
+      opposite colours: 280 drawn of 193808  ok
+n= 7  pairs=     270  entries/side=      317520  maxDTM= 31 plies (mate in 16)  mismatches=0  brute=-  ok
+      same-coloured bishops: 806104 of 806104 white-to-move positions drawn  (all)  ok
+      opposite colours: 400 drawn of 774800  ok
+n= 8  pairs=     462  entries/side=      931392  maxDTM= 37 plies (mate in 19)  mismatches=0  brute=-  ok
+      same-coloured bishops: 2577900 of 2577900 white-to-move positions drawn  (all)  ok
+      opposite colours: 520 drawn of 2504128  ok
+      8x8 checkmates               1552  expected     1552  ok
+      8x8 stalemates              10204  expected    10204  ok
+      8x8 piece en prise        1116752  expected  1116752  ok
+      8x8 black-to-move draws   4016252  expected  4016252  ok
+      8x8 deepest win (plies)        37  expected       37  ok
+n= 9  pairs=     770  entries/side=     2494800  maxDTM= 41 plies (mate in 21)  mismatches=0  brute=-  ok
+      same-coloured bishops: 7088456 of 7088456 white-to-move positions drawn  (all)  ok
+      opposite colours: 672 drawn of 6929216  ok
+n=10  pairs=    1170  entries/side=     5791500  maxDTM= 47 plies (mate in 24)  mismatches=0  brute=-  ok
+      same-coloured bishops: 17353184 of 17353184 white-to-move positions drawn  (all)  ok
+      opposite colours: 824 drawn of 17044640  ok
+
+== KBNK: white has a bishop and a knight ==
+n= 3  pairs=       5  entries/side=         405  maxDTM= 13 plies (mate in 7)  mismatches=0  brute=ok  ok
+      bishop on the corner colour: 416 wtm, 136 drawn, deepest mate in 7
+      bishop off it:               384 wtm, 360 drawn, deepest mate in 1   (never deeper than mate in 2)  ok
+n= 4  pairs=      21  entries/side=        5376  maxDTM= 27 plies (mate in 14)  mismatches=0  brute=ok  ok
+n= 5  pairs=      63  entries/side=       39375  maxDTM= 25 plies (mate in 13)  mismatches=0  brute=ok  ok
+      bishop on the corner colour: 82072 wtm, 1872 drawn, deepest mate in 13
+      bishop off it:               77216 wtm, 76764 drawn, deepest mate in 2   (never deeper than mate in 2)  ok
+n= 6  pairs=     135  entries/side=      174960  maxDTM= 43 plies (mate in 22)  mismatches=0  brute=ok  ok
+n= 7  pairs=     270  entries/side=      648270  maxDTM= 41 plies (mate in 21)  mismatches=0  brute=-  ok
+      bishop on the corner colour: 1723368 wtm, 12712 drawn, deepest mate in 21
+      bishop off it:               1663256 wtm, 1662112 drawn, deepest mate in 2   (never deeper than mate in 2)  ok
+n= 8  pairs=     462  entries/side=     1892352  maxDTM= 65 plies (mate in 33)  mismatches=0  brute=-  ok
+      8x8 checkmates                464  expected      464  ok
+      8x8 stalemates              12888  expected    12888  ok
+      8x8 piece en prise        2330120  expected  2330120  ok
+      8x8 black-to-move draws   2472416  expected  2472416  ok
+      8x8 deepest win (plies)        65  expected       65  ok
+n= 9  pairs=     770  entries/side=     5051970  maxDTM= 57 plies (mate in 29)  mismatches=0  brute=-  ok
+      bishop on the corner colour: 15147552 wtm, 43104 drawn, deepest mate in 29
+      bishop off it:               14810712 wtm, 14808540 drawn, deepest mate in 2   (never deeper than mate in 2)  ok
+n=10  pairs=    1170  entries/side=    11700000  maxDTM= 93 plies (mate in 47)  mismatches=0  brute=-  ok
+
+selftest passed
+
+== 2. full verification of larger boards ==
+   kqk  n=12  full verify ok
+   kqk  n=16  full verify ok
+   kqk  n=20  full verify ok
+   kqk  n=24  full verify ok
+   krk  n=12  full verify ok
+   krk  n=16  full verify ok
+   krk  n=20  full verify ok
+   krk  n=24  full verify ok
+   kbbk  n=10  full verify ok
+   kbbk  n=12  full verify ok
+   kbbk  n=14  full verify ok
+   kbnk  n=10  full verify ok
+   kbnk  n=12  full verify ok
+   kbnk  n=14  full verify ok
+
+== 3. thread-count independence (bit-identical output) ==
+   kqk  n=14  identical for 1/2/3/5/8 threads
+   kqk  n=18  identical for 1/2/3/5/8 threads
+   krk  n=14  identical for 1/2/3/5/8 threads
+   krk  n=18  identical for 1/2/3/5/8 threads
+   kbbk  n=9  identical for 1/2/3/5/8 threads
+   kbbk  n=12  identical for 1/2/3/5/8 threads
+   kbnk  n=9  identical for 1/2/3/5/8 threads
+   kbnk  n=12  identical for 1/2/3/5/8 threads
+
+== 4. file round-trip, raw and run-length encoded ==
+   kqk  n=16  raw  4090024 bytes, run-length  3001527 bytes
+   kqk  both files report identical statistics
+   kqk  reloaded file reports the right endgame
+  verified 2014320 positions (stride 1), 0 mismatches
+   kqk  decoded run-length table verifies
+   krk  n=16  raw  4090024 bytes, run-length  2260086 bytes
+   krk  both files report identical statistics
+   krk  reloaded file reports the right endgame
+  verified 2014320 positions (stride 1), 0 mismatches
+   krk  decoded run-length table verifies
+   kbbk  n=11  raw  25486864 bytes, run-length  43597643 bytes
+   kbbk  both files report identical statistics
+   kbbk  reloaded file reports the right endgame
+  verified 12010005 positions (stride 1), 0 mismatches
+   kbbk  decoded run-length table verifies
+   kbnk  n=11  raw  51394174 bytes, run-length  34862349 bytes
+   kbnk  both files report identical statistics
+   kbnk  reloaded file reports the right endgame
+  verified 24015060 positions (stride 1), 0 mismatches
+   kbnk  decoded run-length table verifies
+
+== 5. the known 8x8 facts ==
+wK=a1 wQ=b2 bK=f5, white to move: white wins, mate in 10 (19 plies)
+   deepest 8x8 KQK win is mate in 10  ok
+wK=a1 wR=b2 bK=c3, white to move: white wins, mate in 16 (31 plies)
+   deepest 8x8 KRK win is mate in 16  ok
+wK=a1 wB1=d1 wB2=h4 bK=d2, white to move: white wins, mate in 19 (37 plies)
+   deepest 8x8 KBBK win is mate in 19  ok
+wK=a1 wB=e1 wN=h6 bK=c1, white to move: white wins, mate in 33 (65 plies)
+   deepest 8x8 KBNK win is mate in 33  ok
+   loose queen with black to move is a draw  ok
+   loose rook with black to move is a draw   ok
+
+== 6. one position, four endgames: what each piece actually covers ==
+   (wK c3, white man(men) on b2, bK a1, Black to move.  A queen on b2
+    covers a1 down the diagonal and is defended, so it is mate; a rook
+    does not attack a1 at all, so it is stalemate.)
+   queen b2 mates the cornered king      ok
+   rook b2 only stalemates it            ok
+   bishops b2+c4 with Kc2 mate a1        ok
+   bishops b2+h6 do not: Ka2 escapes     ok
+
+== 7. KBBK: bishop colour and the trapped-bishop draws ==
+   (two same-coloured bishops can never mate; opposite-coloured ones win
+    except when one is trapped beside a cornered king)
+   same-coloured bishops cannot mate     ok
+   trapped bishop, White to move: draw   ok
+   ... after B-b1 Black is stalemated  ok
+   ... after B-c4 Black is stalemated  ok
+
+== 8. KQK maximum depth follows ceil(3(n-2)/2) for n >= 9 ==
+   n=9  mate in 11  ok
+   n=10  mate in 12  ok
+   n=11  mate in 14  ok
+   n=13  mate in 17  ok
+   n=17  mate in 23  ok
+   n=22  mate in 30  ok
+   n=27  mate in 38  ok
+
+== 9. KRK maximum depth follows m(n) = 14*floor(n/6) + c(n mod 6) ==
+   (c = -3, 0, 2, 5, 7, 10; period 6, one exception at n = 24)
+   n=9  mate in 18  ok
+   n=10  mate in 21  ok
+   n=12  mate in 25  ok
+   n=16  mate in 35  ok
+   n=18  mate in 39  ok
+   n=20  mate in 44  ok
+   n=24  mate in 54  ok
+
+== 10. KBBK maximum depth: measured regression values ==
+   n=8  mate in 19  ok
+   n=10  mate in 24  ok
+   n=12  mate in 29  ok
+   n=14  mate in 35  ok
+   n=16  mate in 40  ok
+
+== 10b. KBNK: a defended piece cannot be captured ==
+   (wK b1, wB e1, wN c2, bK d1, Black to move.  The knight defends the
+    bishop, so Kxe1 is not a move and Black is lost; a solver that treats
+    'the king steps onto a piece' as a capture calls this a draw.)
+   defended bishop, Black to move: lost in 10  ok
+   loose bishop, Black to move: draw       ok
+
+== 11. cross-endgame invariant: en prise counts must agree for KQK/KRK ==
+   (Black may take the piece iff it stands next to the black king
+    undefended, which for a single piece does not depend on which it is)
+   n=6  both 5600  ok
+   n=8  both 22176  ok
+   n=11  both 91800  ok
+   n=14  both 258336  ok
+
+== 12. the table-free mating rule mates from every position ==
+   (White's move is fixed to the rule in src/policy.cpp, Black plays
+    anything, and the worst case is backward-induced over every legal
+    placement.  Cycles and dead ends both count as failures.)
+   n=4..8: mates from everywhere, no cycles, no dead ends  ok
+   n=6  ratio 1.57  <= 1.8  ok
+   n=8  ratio 1.60  <= 1.8  ok
+   oracle control: ratio 1.00 at n=6,7,8            ok
+
+== 13. KQKR: the one endgame here in which Black is armed ==
+   (signed entries and conversion into KQK and KRK.  Black's ...RxQ leaves
+    a bare white king, which White loses, so this table has wins, draws
+    and losses -- none of the other four does.)
+   n=5: Bellman re-derivation and unreduced brute force both agree  ok
+   8x8 deepest win: mate in 35, the published value            ok
+   move generator and index agree with naive versions, n=4..16   ok
+   fortress wK a1 wQ g1 bK c1 bR d1 at n=8: mate in 26        ok
+   fortress wK a1 wQ g1 bK c1 bR d1 at n=9: mate in 30        ok
+   fortress wK a1 wQ g1 bK c1 bR d1 at n=10: mate in 37        ok
+
+== 14. KQKK: king and queen against TWO black kings ==
+   (the black kings may stand beside each other but not beside the white
+    king, and a mate counts only when both of them are mated at once.)
+   n=4,5,6: Bellman re-derivation and unreduced brute force agree  ok
+   move generator, and the value as a class function, n=4..12       ok
+   wK c3 wQ c2, kings a2 and b1: a double mate                     ok
+   wK a1 wQ b1, kings c1 and d1: a single mate, so a draw          ok
+   n=8: every legal white-to-move position is won               ok
+   n=10: every legal white-to-move position is won               ok
+   n=12: every legal white-to-move position is won               ok
+   8x8 deepest win: mate in 7                                      ok
+   loose rules, n=5: both cross-checks agree                       ok
+   loose rules, 8x8: White wins 0.01% of positions                 ok
+
+== 15. KQKK determinism and file round-trip ==
+   n=9 identical for 1/2/3/5/8 threads                             ok
+   a saved table reads back and re-censuses: longest win  15 plies = mate in 8
+   a loose table identifies itself as one when read back           ok
+
+== 16. KQKK under CAPTURE rules ==
+   (every king is an ordinary man that captures and can be captured, and a
+    player wins by taking all of the opponent's.  No check and no mate;
+    both sides can win, so the entries are signed, and the table converts
+    into three sub-endgames built under the same rules.)
+   a black king beside the white king: whoever moves takes it        ok
+   both black kings attacked at once: legal here, illegal there      ok
+   n=3..6: Bellman re-derivation and unreduced brute force agree     ok
+   K vs K+K: two kings hunt down a lone king, from every position   ok
+   K+Q vs K: with no stalemate, White wins from every position      ok
+   K vs K: drawn except where the kings already touch               ok
+   K vs K+K probed directly: kings a1 and e1 win in 17 moves      ok
+   K vs K+K at n=14: black wins everywhere, deepest 123 plies      ok
+   K vs K+K at n=15: the hunt fails, 7.0% left, deepest 73 plies   ok
+   one-king theorem holds against the ordinary KQK table, n=3..8   ok
+   8x8: 364 mates and 872 stalemates, the KQK census exactly        ok
+   8x8: the 22176 queen-en-prise draws stay draws, none drifts      ok
+   the open-board fork wins a king, then needs 13 plies in all      ok
+   wQ h1 beside a king: White wins with the move, Black without     ok
+   wK a1 wQ h3 against kings c1 and c2: White is in zugzwang        ok
+   48 quiet placements in all have White to move and lost           ok
+   a saved capture table reads back identically                     ok
+
+== 17. KNNK and KNNNK: two knights, and three ==
+   (two knights cannot FORCE mate but can mate, so KNNK is not uniformly
+    drawn -- which is why KNNNK cannot score a knight capture as a draw
+    and has to convert into the KNNK table instead.)
+   KNNK has 120 mates on 8x8: a knight capture is NOT a free draw   ok
+   KNNK n=6: White wins only by mating on the move             ok
+   KNNK n=8: White wins only by mating on the move             ok
+   KNNK n=10: White wins only by mating on the move             ok
+   KNNK  n=6  full verify ok
+   KNNK  n=8  full verify ok
+   KNNK  n=10  full verify ok
+   KNNK  n=12  full verify ok
+   KNNK  n=5  agrees with the unreduced solver                  ok
+   KNNK  n=6  agrees with the unreduced solver                  ok
+   KNNNK n=5  full verify ok
+   KNNNK n=6  full verify ok
+   KNNNK n=7  full verify ok
+   KNNNK n=8  full verify ok
+   KNNNK n=9  full verify ok
+   KNNNK n=10  full verify ok
+   KNNNK n=4  agrees with the unreduced solver                  ok
+   KNNNK n=5  agrees with the unreduced solver                  ok
+   KNNNK n=6  agrees with the unreduced solver                  ok
+   KNNNK refuses to solve without its KNNK table                    ok
+   quiet wK f5 wN a1 wN e5 wN f6 bK c3 is drawn at n=8         ok
+   quiet wK f5 wN a1 wN e5 wN f6 bK c3 is drawn at n=10         ok
+   KNNNK 8x8: 1.273% of white-to-move placements are drawn         ok
+   KNNNK 8x8: 94.9% of the draws have a knight loose               ok
+   KNNNK 8x8: only 23.6% of the WINS do, so it is a real contrast  ok
+
+== 18. storage is transparent: mapped file vs anonymous memory ==
+   (--scratch puts the two value arrays in a file so a table larger than
+    RAM pages against the disk rather than against swap.  It must not
+    change a single byte of the answer.)
+   kqk n=12: mapped-file table is byte-identical to the in-memory one  ok
+   kbnk n=8: mapped-file table is byte-identical to the in-memory one  ok
+   knnk n=10: mapped-file table is byte-identical to the in-memory one  ok
+   knnnk n=8: mapped-file table is byte-identical to the in-memory one  ok
+
+== 19. KNNK under CAPTURE rules: stalemate becomes a loss ==
+   (with one king a side the capture rules of section 8 are chess with two
+    clauses changed, and the second -- checkmate becomes a draw under total
+    immobility -- cannot fire for this material.  So they reduce to exactly
+    stalemate-loses, and two knights that cannot force MATE can force it.)
+   8x8: 120 mates under both rules -- the clause creates none      ok
+   8x8: all 3864 chess stalemates become losses, none left over    ok
+   n=4: White wins EVERY legal placement under capture rules     ok
+   n=5: White wins EVERY legal placement under capture rules     ok
+   n=6: White wins EVERY legal placement under capture rules     ok
+   n=14: deepest capture-rule win is 219 plies                     ok
+   n=15: the win collapses, deepest drops to 97 plies              ok
+   quiet wK a1 wN e1 wN c3 bK c1: mate in 104 at n=14            ok
+   the same quiet placement is DRAWN at n=15                     ok
+   KNK under capture rules: 2900 wins at n=12, so it converts      ok
+   KNNK under capture rules refuses to solve without KNK          ok
+   KNNK capture n=5 agrees with the unreduced solver             ok
+   KNNK capture n=6 agrees with the unreduced solver             ok
+   KNNK capture n=7 agrees with the unreduced solver             ok
+   KNNK capture n=8 agrees with the unreduced solver             ok
+   KNNK capture n=9 agrees with the unreduced solver             ok
+   KNNK capture n=12  full verify ok
+   KNNK capture n=14  full verify ok
+   KNNK capture n=15  full verify ok
+
+== 20. KQKB: the same solver, Black's man a bishop ==
+   (kqkr.cpp is parameterised by Black's piece.  KQKB is what KQKBB
+    converts into when White takes a bishop, so it has to be right
+    before the five-man table can be.)
+   n=4: Bellman re-derivation and unreduced brute force agree      ok
+   n=5: Bellman re-derivation and unreduced brute force agree      ok
+   move generator and index agree with naive versions, n=4..14   ok
+   KQKR still mates in 35 at 8x8 after the generalisation        ok
+   capture rules n=4: Bellman and brute force agree             ok
+   capture rules n=5: Bellman and brute force agree             ok
+   no totally immobile terminals, n=3..10, as the theorem needs  ok
+   stalemate losses are 2(n-2) of Black and 0 of White            ok
+   white losses under capture rules are exactly n-2, n>=7        ok
+   the 8x8 deepest line runs through KQK to the mate             ok
+
+== 21. KQKBB: king and queen against king and TWO bishops ==
+   (five men, a signed table, and two conversions -- KQKB when White
+    takes a bishop, KBBK reversed when Black takes the queen.  Black can
+    mate here, so the table has losses as well as wins and draws.)
+   n=3: Bellman re-derivation and unreduced brute force agree      ok
+   n=4: Bellman re-derivation and unreduced brute force agree      ok
+   n=5: 9.8M placements reduce to 472500 slots with no disagreement ok
+   move generator and index agree with naive versions, n=4..12   ok
+   n=6  full Bellman re-derivation ok
+   n=7  full Bellman re-derivation ok
+   same-coloured bishops cannot win: a sample position is drawn  ok
+   1 and 5 threads give the same deepest win                     ok
+
+ALL TESTS PASSED
