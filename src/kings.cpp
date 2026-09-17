@@ -49,6 +49,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <map>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -354,15 +355,21 @@ struct Tbl {
 // I win in k+1; if every move leaves them winning, I lose by the slowest.
 struct Acc {
     int best = 0, worst = 0, moves = 0;
+    // Successors NOT known to be wins for the opponent.  The frontier's
+    // counter is this, counted down; it can only reach zero when every move
+    // walks into a win, which is exactly when the mover is lost.  A draw, an
+    // unresolved successor, a losing successor and a game-ending capture all
+    // count, so it never reaches zero for a position that is not lost.
+    int notWin = 0;
     bool anyDraw = false, anyUnknown = false;
     inline void add(S16 x) {
         ++moves;
-        if (x == UNK) { anyUnknown = true; return; }
-        if (x < 0) { int q = -x + 1; if (!best || q < best) best = q; }
+        if (x == UNK) { anyUnknown = true; ++notWin; return; }
+        if (x < 0) { int q = -x + 1; if (!best || q < best) best = q; ++notWin; }
         else if (x > 0) { if (x + 1 > worst) worst = x + 1; }
-        else anyDraw = true;
+        else { anyDraw = true; ++notWin; }
     }
-    inline void winNow() { ++moves; if (!best || best > 1) best = 1; }
+    inline void winNow() { ++moves; ++notWin; if (!best || best > 1) best = 1; }
 };
 
 // Accumulate every move of `stm` from (W,B).  capW is the table entered when
@@ -453,6 +460,245 @@ static void buildFrames(const Geo& g, const Tbl& t, const int* W,
             fg0[(size_t)j * g.m + dst] = (uint8_t)g2;
         }
     }
+}
+
+// --------------------------------------------------------------------------
+// Out-counting frontier for the reduced tables.
+// --------------------------------------------------------------------------
+// The sweep re-evaluates each entry O(D) times -- measured at 17 to 95 on
+// these tables.  Out-counting evaluates each entry about twice and otherwise
+// only decrements a counter, which is O(b) cheap work per entry.
+//
+// THE COUNTER IS A TRIGGER, NEVER AN ORACLE.  A fired event re-runs the
+// ordinary forward evaluation, so every value written is the sweep's own
+// answer.  That is what makes the D4 stabiliser slack harmless here.  A white
+// set with a nontrivial stabiliser occupies several slots of one orbit, and a
+// reverse move can attribute a predecessor to the wrong one of them, so a
+// counter may be decremented too often or not often enough.  Too often costs
+// a wasted evaluation, which sees an unresolved successor and declines.  Not
+// often enough loses a wake-up, and the closing sweep-to-fixpoint collects
+// those.  Neither can write a wrong value.
+//
+// Every in-table move is a non-capture: White taking a black man converts to
+// (w, b-1) and Black taking a white man to (w-1, b), both other tables.  So
+// the in-table successor graph is the non-capture move graph and its reverse
+// is the same generator run backwards.
+static const int FR_FANOUT = 255;    // outs is a byte
+
+// A white set with a nontrivial stabiliser has its orbit spread over several
+// slots, and t.slot() names only one of them.  A wake-up must reach all of
+// them or the frontier writes values out of order and records wins longer than
+// the shortest.  wt[blk] == 8 means the stabiliser is trivial -- one byte to
+// check, and it is the overwhelmingly common case.
+template <class F>
+static inline void emitOrbitSlots(const Geo& g, const Tbl& t, const Sym& sy,
+                                  const int* Wp, const int* Bp, int ps, F fn) {
+    const U64 wr = rk(Wp, t.w);
+    const int blk = sy.blockOf[wr], g0 = sy.gTo[wr];
+    int im[4];
+    for (int q = 0; q < t.b; ++q) im[q] = g.img(g0, Bp[q]);
+    sortk(im, t.b);
+    fn((U64)blk * t.nb + rk(im, t.b), ps);
+    if (sy.wt[blk] == 8) return;
+    const int* Wc = (const int*)&sy.blkSq[(size_t)blk * t.w];
+    int tw[4], tb[4];
+    for (int e = 1; e < 8; ++e) {
+        for (int q = 0; q < t.w; ++q) tw[q] = g.img(e, Wc[q]);
+        sortk(tw, t.w);
+        bool fix = true;
+        for (int q = 0; q < t.w; ++q) if (tw[q] != Wc[q]) { fix = false; break; }
+        if (!fix) continue;
+        for (int q = 0; q < t.b; ++q) tb[q] = g.img(e, im[q]);
+        sortk(tb, t.b);
+        fn((U64)blk * t.nb + rk(tb, t.b), ps);
+    }
+}
+
+template <class F>
+static void forEachPredSlot(const Geo& g, const Tbl& t, const Sym& sy,
+                            const int* W, const int* B, int stm, F fn) {
+    int dsq[MAXDST], dcap[MAXDST], tm[4];
+    if (stm == 0) {                          // Black moved last; rewind a black man
+        for (int j = 0; j < t.b; ++j) {
+            const int nd = genDst(g, g.pc[1], B[j], B, t.b, W, t.w, dsq, dcap);
+            for (int d = 0; d < nd; ++d) {
+                if (dcap[d] >= 0) continue;  // would be an un-capture: another table
+                for (int q = 0; q < t.b; ++q) tm[q] = B[q];
+                tm[j] = dsq[d]; sortk(tm, t.b);
+                emitOrbitSlots(g, t, sy, W, tm, 1, fn);
+            }
+        }
+    } else {                                 // White moved last; rewind a white man
+        for (int j = 0; j < t.w; ++j) {
+            const int nd = genDst(g, g.pc[0], W[j], W, t.w, B, t.b, dsq, dcap);
+            for (int d = 0; d < nd; ++d) {
+                if (dcap[d] >= 0) continue;
+                for (int q = 0; q < t.w; ++q) tm[q] = W[q];
+                tm[j] = dsq[d]; sortk(tm, t.w);
+                emitOrbitSlots(g, t, sy, tm, B, 0, fn);
+            }
+        }
+    }
+}
+
+static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
+                          const Tbl* capB, int nthr, bool progress) {
+    t.n = g.n; t.m = g.m; t.geo = &g; t.sym = &sy;
+    t.nb = (U64)Ck(g.m, t.b); t.nblk = sy.nblk; t.N = t.nblk * t.nb;
+
+    // Ranking a black set by walking colex from zero is O(nb); the sweep gets
+    // it for free by iterating, the frontier does not.  Precompute the black
+    // sets once -- nb is n^2 for one black man, C(n^2,2) for two.
+    std::vector<int32_t> bset((size_t)t.nb * t.b);
+    {
+        int B[4];
+        for (int q = 0; q < t.b; ++q) B[q] = q;
+        for (U64 br = 0; br < t.nb; ++br) {
+            for (int q = 0; q < t.b; ++q) bset[(size_t)br * t.b + q] = B[q];
+            nextCombo(B, t.b, g.m);
+        }
+    }
+
+    t.alloc(t.N);
+    std::vector<uint8_t> outs[2];
+    for (int s = 0; s < 2; ++s) outs[s].assign(t.N, 0);
+
+    // Illegal slots, and the orbit-weighted population count.
+    {
+        t.legal = 0;
+        for (U64 blk = 0; blk < t.nblk; ++blk) {
+            const int* W = (const int*)&sy.blkSq[(size_t)blk * t.w];
+            for (U64 br = 0; br < t.nb; ++br) {
+                const int32_t* B = &bset[(size_t)br * t.b];
+                bool bad = false;
+                for (int p = 0; p < t.w && !bad; ++p)
+                    for (int q = 0; q < t.b; ++q) if (W[p] == B[q]) { bad = true; break; }
+                const U64 i = blk * t.nb + br;
+                if (bad) { t.put(0, i, ILL); t.put(1, i, ILL); }
+                else t.legal += sy.wt[blk];
+            }
+        }
+    }
+
+    // ---- init: one forward evaluation per entry ------------------------
+    struct Ev { U64 key; int d; };
+    std::vector<std::vector<Ev>> tev(nthr);
+    std::atomic<bool> tooWide{false};
+    {
+        auto initer = [&](int q, U64 lo, U64 hi) {
+            int B[4];
+            std::vector<int32_t> fblk((size_t)t.w * g.m, -1);
+            std::vector<uint8_t> fg0((size_t)t.w * g.m, 0);
+            std::vector<Ev>& ev = tev[q];
+            for (U64 blk = lo; blk < hi; ++blk) {
+                const int* W = (const int*)&sy.blkSq[(size_t)blk * t.w];
+                buildFrames(g, t, W, fblk, fg0);
+                for (U64 br = 0; br < t.nb; ++br) {
+                    const U64 i = blk * t.nb + br;
+                    if (t.get(0, i) == ILL) continue;
+                    for (int z = 0; z < t.b; ++z) B[z] = bset[(size_t)br * t.b + z];
+                    for (int stm = 0; stm < 2; ++stm) {
+                        Acc a;
+                        evalPos(g, t, capW, capB, W, B, stm, a, (int)blk, fblk.data(), fg0.data());
+                        if (a.notWin > FR_FANOUT) { tooWide = true; return; }
+                        outs[stm][i] = (uint8_t)a.notWin;
+                        // Exactly the sweep's precedence.  `best` first: a
+                        // drawn conversion in hand does NOT settle a position
+                        // that also has a win, and an unresolved successor
+                        // does not settle one at all.
+                        if (a.best)                      ev.push_back({ (i << 1) | (U64)stm, a.best });
+                        else if (a.anyUnknown)           { }            // wait for a wake-up
+                        else if (!a.moves || a.anyDraw)  t.put(stm, i, 0);
+                        else                             ev.push_back({ (i << 1) | (U64)stm, a.worst });
+                    }
+                }
+            }
+        };
+        std::vector<std::thread> th;
+        U64 chunk = (t.nblk + nthr - 1) / nthr;
+        for (int q = 0; q < nthr; ++q) {
+            U64 lo = std::min<U64>((U64)q * chunk, t.nblk), hi = std::min<U64>(lo + chunk, t.nblk);
+            if (lo < hi) th.emplace_back(initer, q, lo, hi);
+        }
+        for (auto& x : th) x.join();
+    }
+    if (tooWide.load()) return false;
+
+    // ---- propagate ------------------------------------------------------
+    // No de-duplication.  It is tempting -- a "already queued" bit would keep
+    // the buckets small -- but it is WRONG: a wake-up arriving later with a
+    // SHORTER depth would be dropped, the position would fire at its older,
+    // longer bucket, and it would record a win two plies too long.  That was
+    // an observed bug, uniform +2 across the b = 2 tables.  Duplicates are
+    // harmless instead: a stale event fires, finds the entry already resolved,
+    // and costs one comparison.
+    std::map<int, std::vector<uint64_t>> bucket;
+    auto sched = [&](U64 key, int d) { bucket[d].push_back(key); };
+    for (auto& ev : tev) { for (const Ev& e : ev) sched(e.key, e.d); ev.clear(); ev.shrink_to_fit(); }
+
+    int B0[4];
+    std::vector<int32_t> fblk((size_t)t.w * g.m, -1);
+    std::vector<uint8_t> fg0((size_t)t.w * g.m, 0);
+    U64 evals = 0, lastBlk = (U64)-1;
+    while (!bucket.empty()) {
+        auto it = bucket.begin();
+        const int d = it->first;
+        std::vector<uint64_t> work = std::move(it->second);
+        bucket.erase(it);
+        // Sorting the bucket groups its events by slot, hence by block, so the
+        // frame memo is built once a block rather than once an event -- and it
+        // puts duplicates next to each other, which can then be dropped.
+        // Collapsing duplicates WITHIN one bucket is safe: they carry the same
+        // depth, so none of them is the shorter wake-up the de-dupe bug lost.
+        std::sort(work.begin(), work.end());
+        work.erase(std::unique(work.begin(), work.end()), work.end());
+        lastBlk = (U64)-1;
+        for (U64 key : work) {
+            const U64 i = key >> 1; const int stm = (int)(key & 1);
+            if (t.get(stm, i) != UNK) continue;
+            const U64 blk = i / t.nb, br = i % t.nb;
+            const int* W = (const int*)&sy.blkSq[(size_t)blk * t.w];
+            for (int z = 0; z < t.b; ++z) B0[z] = bset[(size_t)br * t.b + z];
+            if (blk != lastBlk) { buildFrames(g, t, W, fblk, fg0); lastBlk = blk; }
+            Acc a;
+            evalPos(g, t, capW, capB, W, B0, stm, a, (int)blk, fblk.data(), fg0.data());
+            ++evals;
+            // Write ONLY at the bucket equal to the value's own magnitude.
+            // That keeps every write in increasing-depth order, which is what
+            // makes `a.best` the true shortest win when it is taken.  A value
+            // whose magnitude is not d is rescheduled at its own bucket -- the
+            // map is ordered, so a smaller one is picked up next.
+            S16 nv;
+            if (a.best) {
+                if (a.best != d) { sched(key, a.best); continue; }
+                nv = (S16)a.best;
+            } else if (a.anyUnknown) {
+                // A premature wake-up.  Re-derive the counter from the
+                // evaluation we just did, so an over-decrement cannot make the
+                // position permanently undetectable.
+                outs[stm][i] = (uint8_t)a.notWin;
+                continue;
+            } else if (!a.moves || a.anyDraw) {
+                nv = 0;
+            } else {
+                if (a.worst != d) { sched(key, a.worst); continue; }
+                nv = (S16)-a.worst;
+            }
+            t.put(stm, i, nv);
+            if (nv == 0) continue;
+            const int mag = nv < 0 ? -nv : nv;
+            forEachPredSlot(g, t, sy, W, B0, stm, [&](U64 pi, int ps) {
+                if (t.get(ps, pi) != UNK) return;
+                if (nv < 0) { sched((pi << 1) | (U64)ps, mag + 1); return; }   // a loss: predecessors win
+                uint8_t& oo = outs[ps][pi];
+                if (!oo) return;
+                if (--oo == 0) sched((pi << 1) | (U64)ps, mag + 1);            // all its moves lose
+            });
+        }
+    }
+    if (progress) std::printf("      frontier: %llu evaluations (%.2f per entry)\n",
+                              (unsigned long long)evals, (double)evals / (double)(2 * t.N));
+    return true;
 }
 
 // --------------------------------------------------------------------------
@@ -590,6 +836,72 @@ static void solve(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW, const Tb
     }
 }
 
+// The frontier's safety net.  Its counter can miss a wake-up on the slots of a
+// symmetric white orbit, so whatever is still unresolved gets the ordinary
+// per-ply treatment here -- and it must be PER PLY, with the `best <= k` gate.
+// Taking a win as soon as it is computable records the first one found rather
+// than the shortest, which is the bug README section 5 reports the reference
+// solver hitting; it shows up as depths a few plies too long.
+static void fixpoint(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
+                     const Tbl* capB, int nthr, int subMax) {
+    std::vector<U64> todo;
+    for (U64 i = 0; i < t.N; ++i)
+        for (int stm = 0; stm < 2; ++stm)
+            if (t.get(stm, i) == UNK) todo.push_back((i << 1) | (U64)stm);
+    if (todo.empty()) return;
+
+    std::vector<int32_t> bs((size_t)t.nb * t.b);
+    {
+        int B[4];
+        for (int q = 0; q < t.b; ++q) B[q] = q;
+        for (U64 br = 0; br < t.nb; ++br) {
+            for (int q = 0; q < t.b; ++q) bs[(size_t)br * t.b + q] = B[q];
+            nextCombo(B, t.b, g.m);
+        }
+    }
+
+    for (int k = 1;; ++k) {
+        std::atomic<U64> changed{0};
+        std::atomic<int> pend{0};
+        auto worker = [&](size_t lo, size_t hi) {
+            int B[4];
+            std::vector<int32_t> fblk((size_t)t.w * g.m, -1);
+            std::vector<uint8_t> fg0((size_t)t.w * g.m, 0);
+            U64 last = (U64)-1, loc = 0; int locPend = 0;
+            for (size_t z = lo; z < hi; ++z) {
+                const U64 key = todo[z], i = key >> 1;
+                const int stm = (int)(key & 1);
+                if (t.get(stm, i) != UNK) continue;
+                const U64 blk = i / t.nb, br = i % t.nb;
+                const int* W = (const int*)&sy.blkSq[(size_t)blk * t.w];
+                if (blk != last) { buildFrames(g, t, W, fblk, fg0); last = blk; }
+                for (int q = 0; q < t.b; ++q) B[q] = bs[(size_t)br * t.b + q];
+                Acc a;
+                evalPos(g, t, capW, capB, W, B, stm, a, (int)blk, fblk.data(), fg0.data());
+                S16 nv;
+                if (a.best && a.best <= k)      nv = (S16)a.best;
+                else if (a.best)                { if (a.best > locPend) locPend = a.best; continue; }
+                else if (a.anyUnknown)          continue;
+                else if (!a.moves || a.anyDraw) nv = 0;
+                else                            nv = (S16)-a.worst;
+                t.put(stm, i, nv); ++loc;
+            }
+            changed += loc;
+            int cur = pend.load();
+            while (locPend > cur && !pend.compare_exchange_weak(cur, locPend)) {}
+        };
+        std::vector<std::thread> th;
+        const size_t chunk = (todo.size() + nthr - 1) / nthr;
+        for (int q = 0; q < nthr; ++q) {
+            size_t lo = std::min(q * chunk, todo.size()), hi = std::min(lo + chunk, todo.size());
+            if (lo < hi) th.emplace_back(worker, lo, hi);
+        }
+        for (auto& x : th) x.join();
+        if (!changed.load() && pend.load() <= k && k > subMax) break;
+        if (k > 40000) break;
+    }
+}
+
 // --------------------------------------------------------------------------
 // The suite of tables for W white kings against B black kings.
 // --------------------------------------------------------------------------
@@ -614,7 +926,87 @@ struct Suite {
                 if (b < 1 || b > B) continue;
                 t[w][b].w = w; t[w][b].b = b;
                 Timer tm;
-                solve(g, t[w][b], sym[w], capWof(w, b), capBof(w, b), nthr, progress);
+                Tbl& T = t[w][b];
+                const Tbl* cW = capWof(w, b);
+                const Tbl* cB = capBof(w, b);
+                int sm2 = 0;
+                if (cW) sm2 = std::max(sm2, cW->maxAbs);
+                if (cB) sm2 = std::max(sm2, cB->maxAbs);
+
+                auto finish = [&]() {
+                    for (int sm = 0; sm < 2; ++sm)
+                        for (U64 z = 0; z < T.N; ++z)
+                            if (T.get(sm, z) == UNK) T.put(sm, z, 0);
+                    T.maxAbs = 0;
+                    for (int sm = 0; sm < 2; ++sm)
+                        for (U64 z = 0; z < T.N; ++z) {
+                            S16 x = T.get(sm, z);
+                            if (x == ILL) continue;
+                            int q2 = x < 0 ? -x : x;
+                            if (q2 > T.maxAbs) T.maxAbs = q2;
+                        }
+                };
+                auto runFrontier = [&]() -> bool {
+                    if (!solveFrontier(g, T, sym[w], cW, cB, nthr, progress)) return false;
+                    U64 before = 0;
+                    for (U64 z = 0; z < T.N; ++z)
+                        for (int sm = 0; sm < 2; ++sm) if (T.get(sm, z) == UNK) ++before;
+                    fixpoint(g, T, sym[w], cW, cB, nthr, sm2);
+                    U64 after = 0;
+                    for (U64 z = 0; z < T.N; ++z)
+                        for (int sm = 0; sm < 2; ++sm) if (T.get(sm, z) == UNK) ++after;
+                    if (getenv("EGTB_CHECKFRONTIER"))
+                        std::fprintf(stderr, "  [fixpoint] K%dvK%d n=%d: %llu unresolved after the "
+                                     "frontier, %llu settled by the closing sweep\n",
+                                     w, b, g.n, (unsigned long long)before,
+                                     (unsigned long long)(before - after));
+                    finish();
+                    return true;
+                };
+
+                if (getenv("EGTB_CHECKFRONTIER")) {
+                    std::vector<S16> snap[2];
+                    bool ok = runFrontier();
+                    if (ok) {
+                        for (int sm = 0; sm < 2; ++sm) {
+                            snap[sm].resize(T.N);
+                            for (U64 z = 0; z < T.N; ++z) snap[sm][z] = T.get(sm, z);
+                        }
+                    }
+                    solve(g, T, sym[w], cW, cB, nthr, progress);
+                    if (ok) {
+                        U64 bad = 0; U64 fi = 0; int fs = -1;
+                        for (int sm = 0; sm < 2; ++sm)
+                            for (U64 z = 0; z < T.N; ++z)
+                                if (snap[sm][z] != T.get(sm, z)) {
+                                    if (!bad) { fi = z; fs = sm; }
+                                    ++bad;
+                                }
+                        if (bad) {
+                            const U64 blk = fi / T.nb, br = fi % T.nb;
+                            const int* WW = (const int*)&sym[w].blkSq[(size_t)blk * T.w];
+                            int BB[4]; for (int q = 0; q < T.b; ++q) BB[q] = q;
+                            for (U64 z = 0; z < br; ++z) nextCombo(BB, T.b, g.m);
+                            std::string sq;
+                            for (int q = 0; q < T.w; ++q) sq += " W" + g.name(WW[q]);
+                            for (int q = 0; q < T.b; ++q) sq += " b" + g.name(BB[q]);
+                            std::fprintf(stderr, "  [frontier] K%dvK%d n=%d MISMATCH %llu of %llu entries;"
+                                         " first stm=%d slot=%llu (%s) frontier=%d sweep=%d\n",
+                                         w, b, g.n, (unsigned long long)bad,
+                                         (unsigned long long)(2 * T.N), fs,
+                                         (unsigned long long)fi, sq.c_str(),
+                                         (int)snap[fs][fi], (int)T.get(fs, fi));
+                        } else
+                            std::fprintf(stderr, "  [frontier] K%dvK%d n=%d identical to the sweep"
+                                         " (%llu entries, maxAbs %d)\n", w, b, g.n,
+                                         (unsigned long long)(2 * T.N), T.maxAbs);
+                    }
+                } else if (!(!getenv("EGTB_SWEEP") && runFrontier())) {
+                    // The frontier is the default; EGTB_SWEEP forces the old
+                    // per-ply induction, and runFrontier() declines by itself
+                    // when a fan-out will not fit the one-byte counter.
+                    solve(g, T, sym[w], cW, cB, nthr, progress);
+                }
                 have[w][b] = true;
                 if (progress)
                     std::printf("   built K%d vs K%d: %llu slots/side (%llu positions), deepest %d ply, %.2f s\n",
