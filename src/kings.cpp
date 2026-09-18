@@ -776,6 +776,20 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
     t.alloc(t.N);
     std::vector<uint8_t> outs[2];
     for (int s = 0; s < 2; ++s) outs[s].assign(t.N, 0);
+    if (getenv("EGTB_MEM")) {
+        const double M = 1.0 / (1024.0 * 1024.0);
+        std::fprintf(stderr,
+            "      mem  %d v %d  n=%d:  N=%llu slots, nblk=%llu, nb=%llu, C(m,w)=%llu\n"
+            "      mem    values %8.0f MB   outs %8.0f MB   bitmap  %8.0f MB\n"
+            "      mem    blockOf %7.0f MB   gTo  %8.0f MB   blkSq   %8.0f MB   wt %6.0f MB\n",
+            t.w, t.b, t.n, (unsigned long long)t.N, (unsigned long long)t.nblk,
+            (unsigned long long)t.nb, (unsigned long long)sy.nw,
+            (double)(t.wide ? 4 : 2) * (double)t.N * M,
+            2.0 * (double)t.N * M,
+            (double)((2 * t.N + 63) / 64) * 8.0 * M,
+            (double)sy.blockOf.size() * 4.0 * M, (double)sy.gTo.size() * M,
+            (double)sy.blkSq.size() * 4.0 * M, (double)sy.wt.size() * M);
+    }
 
     // Illegal slots, and the orbit-weighted population count.
     {
@@ -794,85 +808,8 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
         }
     }
 
-    // ---- init: one forward evaluation per entry ------------------------
-    struct Ev { U64 key; int d; };
-    std::vector<std::vector<Ev>> tev(nthr);
-    std::atomic<bool> tooWide{false};
-    {
-        auto initer = [&](int q, auto& claim) {
-            int B[4];
-            Frames fr; fr.alloc(g, t);
-            U64 lo, hi;
-            std::vector<Ev>& ev = tev[q];
-            while (claim(lo, hi)) {
-                for (U64 blk = lo; blk < hi; ++blk) {
-                    const int* W = (const int*)&sy.blkSq[(size_t)blk * t.w];
-                    fr.build(g, t, W);
-                    for (U64 br = 0; br < t.nb; ++br) {
-                        const U64 i = blk * t.nb + br;
-                        if (t.get(0, i) == ILL) continue;
-                        for (int z = 0; z < t.b; ++z) B[z] = bset[(size_t)br * t.b + z];
-                        for (int stm = 0; stm < 2; ++stm) {
-                            Acc a;
-                            evalPos(g, t, capW, capB, W, B, stm, a, (int)blk, fr);
-                            if (a.notWin > FR_FANOUT) { tooWide = true; return; }
-                            outs[stm][i] = (uint8_t)a.notWin;
-                            // Exactly the sweep's precedence.  `best` first: a
-                            // drawn conversion in hand does NOT settle a position
-                            // that also has a win, and an unresolved successor
-                            // does not settle one at all.
-                            if (a.best)                      ev.push_back({ (i << 1) | (U64)stm, a.best });
-                            else if (a.anyUnknown)           { }            // wait for a wake-up
-                            else if (!a.moves || a.anyDraw)  t.put(stm, i, 0);
-                            else                             ev.push_back({ (i << 1) | (U64)stm, a.worst });
-                        }
-                    }
-                }
-            }
-        };
-        // A block is C(m, b) positions, so a few dozen of them is already a
-        // substantial chunk.
-        parDyn(nthr, t.nblk, 32, initer);
-    }
-    if (tooWide.load()) return false;
-
-    // ---- propagate ------------------------------------------------------
-    // De-duplication is per depth and MUST NOT be wider than that.  A single
-    // "already queued" bit spanning all depths is tempting and is WRONG: a
-    // wake-up arriving later with a SHORTER depth would be dropped, the
-    // position would fire at its older, longer bucket, and it would record a
-    // win two plies too long.  That was an observed bug, uniform +2 across
-    // the b = 2 tables.  Within one depth there is nothing to lose, since
-    // every event in a bucket carries that bucket's depth; the bitmap below
-    // collapses those, and a duplicate that survives is harmless anyway -- it
-    // fires, finds the entry already resolved, and costs one comparison.
-    std::map<int, std::vector<uint64_t>> bucket;
-    auto sched = [&](U64 key, int d) { bucket[d].push_back(key); };
-    for (auto& ev : tev) { for (const Ev& e : ev) sched(e.key, e.d); ev.clear(); ev.shrink_to_fit(); }
-
-    // A bucket's wake-ups all land on the very next depth.  A value is
-    // written only at the bucket equal to its own magnitude, so a predecessor
-    // woken by it is a win in exactly d + 1 -- which means the queue for the
-    // next depth needs one bit per slot, not a list of slots.  That removes
-    // the serial sort whose only jobs were to group the list by block and
-    // collapse its duplicates: scanning a bitmap yields slots in increasing
-    // order, which IS block order, and a bit cannot be set twice.  Measured
-    // on KKKK v K n = 10, the sort was 4.85s and merging the per-thread lists
-    // another 0.77s, against 10.40s of parallel evaluation -- a 35% serial
-    // tail on 236 million queued keys.  Collapsing the duplicates on the way
-    // in rather than afterwards also cut the traffic itself, 224M pushes down
-    // to 83M bits.
-    //
-    // Each bitmap stands for exactly one depth and is cleared when that depth
-    // runs, which is what keeps the dedupe inside a depth.  Two bitmaps, so
-    // the depth being consumed and the depth being filled do not collide.
-    //
-    // Two things still need the list.  A re-evaluation that turns out to
-    // belong to a later depth carries its own depth, and so does an init
-    // event; those were 5% of the traffic.  And a re-evaluation can name a
-    // depth BELOW the bitmap's -- a wake-up delayed by the stabiliser slack,
-    // finding a win shorter than the bucket it fired in -- which runs from
-    // the map the old way, leaving the bitmap alone for its own depth.
+    static const bool kQueueCount = getenv("EGTB_QUEUE") != nullptr;
+    static const bool kNoBits = getenv("EGTB_NOBITS") != nullptr;
 
     // Small buckets are not worth eight thread launches.  EGTB_PAR_MIN lowers
     // the threshold so a sanitiser run can be forced down the parallel paths
@@ -881,11 +818,14 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
     static const size_t kParMin =
         getenv("EGTB_PAR_MIN") ? (size_t)std::atol(getenv("EGTB_PAR_MIN")) : 8192;
 
+    // One bitmap, not two.  The depth being drained and the depth being
+    // filled never overlap in time: drainBits materialises the whole queue
+    // into `work` and zeroes the bitmap before any wake-up for the next depth
+    // is written, so the same array serves both ends.
     const U64 nkey = 2 * t.N;
-    std::vector<U64> bits[2];
-    bits[0].assign((size_t)((nkey + 63) / 64), 0);
-    bits[1].assign((size_t)((nkey + 63) / 64), 0);
-    int cur = 0, bitsD = -1;
+    std::vector<U64> bits;
+    bits.assign((size_t)((nkey + 63) / 64), 0);
+    int bitsD = -1;
     U64 nsetCur = 0;
     std::vector<U64> nsetT((size_t)nthr, 0);
 
@@ -940,6 +880,129 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
         }
     };
 
+    // ---- init: one forward evaluation per entry ------------------------
+    struct Ev { U64 key; int d; };
+    std::vector<std::vector<Ev>> tev(nthr);
+    std::vector<U64> seedT((size_t)nthr, 0);
+    std::atomic<bool> tooWide{false};
+    {
+        auto initer = [&](int q, auto& claim) {
+            int B[4];
+            Frames fr; fr.alloc(g, t);
+            U64 lo, hi;
+            std::vector<Ev>& ev = tev[q];
+            U64* const sb = bits.data();
+            U64 seeds = 0;
+            auto setSeed = [&](U64 k) -> bool {
+                std::atomic_ref<U64> r(sb[k >> 6]);
+                const U64 mk = (U64)1 << (k & 63);
+                return !(r.fetch_or(mk, std::memory_order_relaxed) & mk);
+            };
+            while (claim(lo, hi)) {
+                for (U64 blk = lo; blk < hi; ++blk) {
+                    const int* W = (const int*)&sy.blkSq[(size_t)blk * t.w];
+                    fr.build(g, t, W);
+                    for (U64 br = 0; br < t.nb; ++br) {
+                        const U64 i = blk * t.nb + br;
+                        if (t.get(0, i) == ILL) continue;
+                        for (int z = 0; z < t.b; ++z) B[z] = bset[(size_t)br * t.b + z];
+                        for (int stm = 0; stm < 2; ++stm) {
+                            Acc a;
+                            evalPos(g, t, capW, capB, W, B, stm, a, (int)blk, fr);
+                            if (a.notWin > FR_FANOUT) { tooWide = true; return; }
+                            outs[stm][i] = (uint8_t)a.notWin;
+                            // Exactly the sweep's precedence.  `best` first: a
+                            // drawn conversion in hand does NOT settle a position
+                            // that also has a win, and an unresolved successor
+                            // does not settle one at all.
+                            // A win in one is the shortest win there is, so a depth-1
+                            // event belongs to the first bucket the propagation will
+                            // run -- the bitmap's -- and goes straight in, costing a
+                            // bit instead of a list entry.  On every w-versus-1 table
+                            // that is ALL of them: taking the last man is the only
+                            // thing the init pass can settle, and it settles it in one.
+                            // Deeper events still need the list, which is what the
+                            // b = 2 tables use.
+                            if (a.best == 1 && !kNoBits)     { if (setSeed((i << 1) | (U64)stm)) ++seeds; }
+                            else if (a.best)                 ev.push_back({ (i << 1) | (U64)stm, a.best });
+                            else if (a.anyUnknown)           { }            // wait for a wake-up
+                            else if (!a.moves || a.anyDraw)  t.put(stm, i, 0);
+                            else if (a.worst == 1 && !kNoBits) { if (setSeed((i << 1) | (U64)stm)) ++seeds; }
+                            else                             ev.push_back({ (i << 1) | (U64)stm, a.worst });
+                        }
+                    }
+                }
+            }
+            seedT[(size_t)q] = seeds;
+        };
+        // A block is C(m, b) positions, so a few dozen of them is already a
+        // substantial chunk.
+        parDyn(nthr, t.nblk, 32, initer);
+        for (const U64 c : seedT) nsetCur += c;
+        if (nsetCur) bitsD = 1;                  // the bitmap now holds bucket 1
+    }
+    if (tooWide.load()) return false;
+
+    // ---- propagate ------------------------------------------------------
+    // De-duplication is per depth and MUST NOT be wider than that.  A single
+    // "already queued" bit spanning all depths is tempting and is WRONG: a
+    // wake-up arriving later with a SHORTER depth would be dropped, the
+    // position would fire at its older, longer bucket, and it would record a
+    // win two plies too long.  That was an observed bug, uniform +2 across
+    // the b = 2 tables.  Within one depth there is nothing to lose, since
+    // every event in a bucket carries that bucket's depth; the bitmap below
+    // collapses those, and a duplicate that survives is harmless anyway -- it
+    // fires, finds the entry already resolved, and costs one comparison.
+    std::map<int, std::vector<uint64_t>> bucket;
+    auto sched = [&](U64 key, int d) { bucket[d].push_back(key); };
+    if (getenv("EGTB_MEM")) {                      // depth histogram of init events
+        std::map<int, U64> h;
+        for (const auto& ev : tev) for (const Ev& e : ev) ++h[e.d];
+        U64 tot = 0; for (const auto& kv : h) tot += kv.second;
+        std::fprintf(stderr, "      mem    init events by depth (%llu total):",
+                     (unsigned long long)tot);
+        int shown = 0;
+        for (const auto& kv : h) {
+            if (shown++ < 8)
+                std::fprintf(stderr, "  d=%d:%.1f%%", kv.first, 100.0 * (double)kv.second / (double)std::max<U64>(1, tot));
+        }
+        std::fprintf(stderr, "%s\n", h.size() > 8 ? "  ..." : "");
+    }
+    U64 memTev = 0, memXfer = 0, memPeak = 0, memWork = 0, memBuck = 0, memWk = 0;
+    for (const auto& ev : tev) memTev += (U64)ev.capacity() * sizeof(Ev);
+    for (auto& ev : tev) {
+        for (const Ev& e : ev) sched(e.key, e.d);
+        ev.clear(); ev.shrink_to_fit();
+        U64 live = 0;
+        for (const auto& v : tev) live += (U64)v.capacity() * sizeof(Ev);
+        for (const auto& kv : bucket) live += (U64)kv.second.capacity() * 8;
+        if (live > memXfer) memXfer = live;
+    }
+
+    // A bucket's wake-ups all land on the very next depth.  A value is
+    // written only at the bucket equal to its own magnitude, so a predecessor
+    // woken by it is a win in exactly d + 1 -- which means the queue for the
+    // next depth needs one bit per slot, not a list of slots.  That removes
+    // the serial sort whose only jobs were to group the list by block and
+    // collapse its duplicates: scanning a bitmap yields slots in increasing
+    // order, which IS block order, and a bit cannot be set twice.  Measured
+    // on KKKK v K n = 10, the sort was 4.85s and merging the per-thread lists
+    // another 0.77s, against 10.40s of parallel evaluation -- a 35% serial
+    // tail on 236 million queued keys.  Collapsing the duplicates on the way
+    // in rather than afterwards also cut the traffic itself, 224M pushes down
+    // to 83M bits.
+    //
+    // Each bitmap stands for exactly one depth and is cleared when that depth
+    // runs, which is what keeps the dedupe inside a depth.  Two bitmaps, so
+    // the depth being consumed and the depth being filled do not collide.
+    //
+    // Two things still need the list.  A re-evaluation that turns out to
+    // belong to a later depth carries its own depth, and so does an init
+    // event; those were 5% of the traffic.  And a re-evaluation can name a
+    // depth BELOW the bitmap's -- a wake-up delayed by the stabiliser slack,
+    // finding a win shorter than the bucket it fired in -- which runs from
+    // the map the old way, leaving the bitmap alone for its own depth.
+
     // ---- propagate, buckets in increasing depth ------------------------
     // Events inside one bucket are independent: they all carry depth d, and a
     // win at d only reads losses at d-1, which were written in an earlier
@@ -954,8 +1017,6 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
     // from its own evaluation.  That can only leave the counter too HIGH, so
     // the position is never wrongly declared lost -- it is left unresolved
     // instead, and the closing fixpoint collects it.
-    static const bool kQueueCount = getenv("EGTB_QUEUE") != nullptr;
-    static const bool kNoBits = getenv("EGTB_NOBITS") != nullptr;
     struct Wake { int d; uint64_t key; };
     std::vector<std::vector<Wake>> wk(nthr);
     std::atomic<U64> evalsA{0};
@@ -1002,13 +1063,13 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
             auto it = bucket.find(d);
             if (it != bucket.end()) {
                 for (const uint64_t k : it->second) {
-                    U64& wd = bits[cur][(size_t)(k >> 6)];
+                    U64& wd = bits[(size_t)(k >> 6)];
                     const U64 mk = (U64)1 << (k & 63);
                     if (!(wd & mk)) { wd |= mk; ++nsetCur; }
                 }
                 bucket.erase(it);
             }
-            drainBits(bits[cur], nsetCur, work);
+            drainBits(bits, nsetCur, work);
             nsetCur = 0;
         } else {
             auto it = bucket.find(d);
@@ -1022,7 +1083,6 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
         if (work.empty()) continue;
         for (auto& v : wk) v.clear();
         std::fill(nsetT.begin(), nsetT.end(), 0);
-        const int nxt = 1 - cur;
 
         auto run = [&](int q, auto& claim) {
             int B0[4];
@@ -1032,7 +1092,7 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
             // Set a bit in the next depth's map; true if this call is what put
             // it there.  Relaxed is enough: the bit only has to be visible by
             // the join, which orders it.
-            U64* const nb_ = bits[nxt].data();
+            U64* const nb_ = bits.data();
             auto setNext = [&](U64 k) -> bool {
                 std::atomic_ref<U64> r(nb_[k >> 6]);
                 const U64 mk = (U64)1 << (k & 63);
@@ -1094,16 +1154,31 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
         // and still leaves a short tail.
         parDyn(work.size() < kParMin ? 1 : nthr, work.size(), 1024, run);
         if (kQueueCount) gTpar += tP.s();
+        {
+            const U64 lw = (U64)work.capacity() * 8;
+            U64 lb = 0, lk = 0;
+            for (const auto& kv : bucket) lb += (U64)kv.second.capacity() * 8;
+            for (const auto& v : wk) lk += (U64)v.capacity() * sizeof(Wake);
+            if (lw + lb + lk > memPeak) { memPeak = lw + lb + lk; memWork = lw; memBuck = lb; memWk = lk; }
+        }
         Timer tM;
         for (auto& v : wk) for (const Wake& e : v) bucket[e.d].push_back(e.key);
         if (useBits) {
             U64 tot = 0;
             for (const U64 c : nsetT) tot += c;
-            cur = nxt; bitsD = d + 1; nsetCur = tot;
+            bitsD = d + 1; nsetCur = tot;
         }
         if (kQueueCount) gTmerge += tM.s();
     }
     const U64 evals = evalsA.load();
+    if (getenv("EGTB_MEM")) {
+        const double M = 1.0 / (1024.0 * 1024.0);
+        std::fprintf(stderr,
+            "      mem    TRANSIENT: init events %6.0f MB, transfer %6.0f MB, queue peak %6.0f MB"
+            " = work %5.0f + buckets %5.0f + wake lists %5.0f\n",
+            (double)memTev * M, (double)memXfer * M, (double)memPeak * M,
+            (double)memWork * M, (double)memBuck * M, (double)memWk * M);
+    }
 
     if (kQueueCount) {
         const U64 wk_ = gWake.load(), un = gAfterUniq.load();
