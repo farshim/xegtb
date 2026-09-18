@@ -466,34 +466,40 @@ struct Frames {
     bool flat = false;                // is the flat list exact?
 
     void alloc(const Geo& g, const Tbl& t) {
-        blk.assign((size_t)t.w * g.m, -1);
-        g0.assign((size_t)t.w * g.m, 0);
         flat = !capIsSlider(g.pc[0]);
         if (flat) {
+            // The square-indexed map is read only where the flat list cannot
+            // be used, so when there is a flat list it is not built at all --
+            // and is left empty, so that a stray read faults rather than
+            // quietly returning -1.
             const size_t cap = (size_t)t.w * 8;   // a king or a knight: at most 8
             fdst.resize(cap); ffb.resize(cap); ffg.resize(cap);
+            return;
         }
+        blk.assign((size_t)t.w * g.m, -1);
+        g0.assign((size_t)t.w * g.m, 0);
     }
 
     void build(const Geo& g, const Tbl& t, const int* W) {
         int dsq[MAXDST], dcap[MAXDST], tm[4];
         nflat = 0;
         for (int j = 0; j < t.w; ++j) {
-            int32_t* pb = &blk[(size_t)j * g.m];
-            std::fill(pb, pb + g.m, -1);
+            int32_t* pb = nullptr;
+            if (!flat) { pb = &blk[(size_t)j * g.m]; std::fill(pb, pb + g.m, -1); }
             const int nd = genDst(g, g.pc[0], W[j], W, t.w, nullptr, 0, dsq, dcap);
             for (int d = 0; d < nd; ++d) {
                 const int dst = dsq[d];
                 cpk(tm, W, t.w);
                 tm[j] = dst; sortk(tm, t.w);
                 int b2, g2; t.whiteFrame(tm, b2, g2);
-                pb[dst] = (int32_t)b2;
-                g0[(size_t)j * g.m + dst] = (uint8_t)g2;
                 if (flat) {
                     fdst[(size_t)nflat] = dst;
                     ffb[(size_t)nflat] = (int32_t)b2;
                     ffg[(size_t)nflat] = (uint8_t)g2;
                     ++nflat;
+                } else {
+                    pb[dst] = (int32_t)b2;
+                    g0[(size_t)j * g.m + dst] = (uint8_t)g2;
                 }
             }
         }
