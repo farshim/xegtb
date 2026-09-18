@@ -95,6 +95,9 @@ static inline void st8(S8* p, U64 i, S8 v) {
 }
 
 static std::atomic<U64> gEvals{0}, gSucc{0}, gSweeps{0};
+// Frontier queue accounting, printed under EGTB_QUEUE.
+static std::atomic<U64> gWake{0}, gAfterUniq{0}, gBuckets{0}, gBackwards{0};
+static double gTsort = 0, gTmerge = 0, gTpar = 0;
 
 struct Timer {
     std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
@@ -665,16 +668,108 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
     if (tooWide.load()) return false;
 
     // ---- propagate ------------------------------------------------------
-    // No de-duplication.  It is tempting -- a "already queued" bit would keep
-    // the buckets small -- but it is WRONG: a wake-up arriving later with a
-    // SHORTER depth would be dropped, the position would fire at its older,
-    // longer bucket, and it would record a win two plies too long.  That was
-    // an observed bug, uniform +2 across the b = 2 tables.  Duplicates are
-    // harmless instead: a stale event fires, finds the entry already resolved,
-    // and costs one comparison.
+    // De-duplication is per depth and MUST NOT be wider than that.  A single
+    // "already queued" bit spanning all depths is tempting and is WRONG: a
+    // wake-up arriving later with a SHORTER depth would be dropped, the
+    // position would fire at its older, longer bucket, and it would record a
+    // win two plies too long.  That was an observed bug, uniform +2 across
+    // the b = 2 tables.  Within one depth there is nothing to lose, since
+    // every event in a bucket carries that bucket's depth; the bitmap below
+    // collapses those, and a duplicate that survives is harmless anyway -- it
+    // fires, finds the entry already resolved, and costs one comparison.
     std::map<int, std::vector<uint64_t>> bucket;
     auto sched = [&](U64 key, int d) { bucket[d].push_back(key); };
     for (auto& ev : tev) { for (const Ev& e : ev) sched(e.key, e.d); ev.clear(); ev.shrink_to_fit(); }
+
+    // A bucket's wake-ups all land on the very next depth.  A value is
+    // written only at the bucket equal to its own magnitude, so a predecessor
+    // woken by it is a win in exactly d + 1 -- which means the queue for the
+    // next depth needs one bit per slot, not a list of slots.  That removes
+    // the serial sort whose only jobs were to group the list by block and
+    // collapse its duplicates: scanning a bitmap yields slots in increasing
+    // order, which IS block order, and a bit cannot be set twice.  Measured
+    // on KKKK v K n = 10, the sort was 4.85s and merging the per-thread lists
+    // another 0.77s, against 10.40s of parallel evaluation -- a 35% serial
+    // tail on 236 million queued keys.  Collapsing the duplicates on the way
+    // in rather than afterwards also cut the traffic itself, 224M pushes down
+    // to 83M bits.
+    //
+    // Each bitmap stands for exactly one depth and is cleared when that depth
+    // runs, which is what keeps the dedupe inside a depth.  Two bitmaps, so
+    // the depth being consumed and the depth being filled do not collide.
+    //
+    // Two things still need the list.  A re-evaluation that turns out to
+    // belong to a later depth carries its own depth, and so does an init
+    // event; those were 5% of the traffic.  And a re-evaluation can name a
+    // depth BELOW the bitmap's -- a wake-up delayed by the stabiliser slack,
+    // finding a win shorter than the bucket it fired in -- which runs from
+    // the map the old way, leaving the bitmap alone for its own depth.
+
+    // Small buckets are not worth eight thread launches.  EGTB_PAR_MIN lowers
+    // the threshold so a sanitiser run can be forced down the parallel paths
+    // -- both the bitmap drain and the propagation -- on a board small enough
+    // to run under one.
+    static const size_t kParMin =
+        getenv("EGTB_PAR_MIN") ? (size_t)std::atol(getenv("EGTB_PAR_MIN")) : 8192;
+
+    const U64 nkey = 2 * t.N;
+    std::vector<U64> bits[2];
+    bits[0].assign((size_t)((nkey + 63) / 64), 0);
+    bits[1].assign((size_t)((nkey + 63) / 64), 0);
+    int cur = 0, bitsD = -1;
+    U64 nsetCur = 0;
+    std::vector<U64> nsetT((size_t)nthr, 0);
+
+    // Materialise one depth's queue from its bitmap, in increasing key order,
+    // and clear the bitmap as it goes.  Two streaming passes: popcount each
+    // thread's word range to find where its output starts, then fill.
+    auto drainBits = [&](std::vector<U64>& bm, U64 count, std::vector<uint64_t>& out) {
+        out.resize((size_t)count);
+        if (!count) { std::fill(bm.begin(), bm.end(), 0); return; }
+        const size_t nw = bm.size();
+        const int P = (count < (U64)kParMin || nthr < 2) ? 1 : nthr;
+        const size_t chunk = (nw + P - 1) / P;
+        std::vector<U64> off((size_t)P + 1, 0);
+        auto pass1 = [&](int q) {
+            const size_t lo = std::min((size_t)q * chunk, nw), hi = std::min(lo + chunk, nw);
+            U64 c = 0;
+            for (size_t z = lo; z < hi; ++z) c += (U64)__builtin_popcountll(bm[z]);
+            off[(size_t)q + 1] = c;
+        };
+        auto pass2 = [&](int q) {
+            const size_t lo = std::min((size_t)q * chunk, nw), hi = std::min(lo + chunk, nw);
+            U64 at = off[(size_t)q];
+            for (size_t z = lo; z < hi; ++z) {
+                U64 wv = bm[z];
+                if (!wv) continue;
+                bm[z] = 0;
+                do { const int b = __builtin_ctzll(wv); wv &= wv - 1;
+                     out[(size_t)at++] = ((U64)z << 6) | (U64)b; } while (wv);
+            }
+        };
+        if (P == 1) pass1(0);
+        else {
+            std::vector<std::thread> th;
+            for (int q = 0; q < P; ++q) th.emplace_back(pass1, q);
+            for (auto& x : th) x.join();
+        }
+        for (int q = 0; q < P; ++q) off[(size_t)q + 1] += off[(size_t)q];
+        // `count` is carried along as bits are set, one increment per 0 -> 1
+        // transition, rather than recounted here; this is where the two meet.
+        // Getting it wrong would size `out` wrongly, so say so rather than
+        // write past it or leave a stale key in the tail.
+        if (off[(size_t)P] != count) {
+            std::fprintf(stderr, "kings: frontier bitmap holds %llu bits, expected %llu\n",
+                         (unsigned long long)off[(size_t)P], (unsigned long long)count);
+            std::abort();
+        }
+        if (P == 1) { pass2(0); return; }
+        {
+            std::vector<std::thread> th;
+            for (int q = 0; q < P; ++q) th.emplace_back(pass2, q);
+            for (auto& x : th) x.join();
+        }
+    };
 
     // ---- propagate, buckets in increasing depth ------------------------
     // Events inside one bucket are independent: they all carry depth d, and a
@@ -690,6 +785,8 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
     // from its own evaluation.  That can only leave the counter too HIGH, so
     // the position is never wrongly declared lost -- it is left unresolved
     // instead, and the closing fixpoint collects it.
+    static const bool kQueueCount = getenv("EGTB_QUEUE") != nullptr;
+    static const bool kNoBits = getenv("EGTB_NOBITS") != nullptr;
     struct Wake { int d; uint64_t key; };
     std::vector<std::vector<Wake>> wk(nthr);
     std::atomic<U64> evalsA{0};
@@ -703,26 +800,76 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
         return false;
     };
 
-    while (!bucket.empty()) {
-        auto it = bucket.begin();
-        const int d = it->first;
-        std::vector<uint64_t> work = std::move(it->second);
-        bucket.erase(it);
-        // Sorting groups the bucket by slot, hence by block, so the frame memo
-        // is built once a block rather than once an event -- and it puts
-        // duplicates together so they can be dropped.  Collapsing duplicates
-        // WITHIN one bucket is safe: they all carry the same depth, so none of
-        // them is the shorter wake-up that de-duplicating across buckets lost.
-        std::sort(work.begin(), work.end());
-        work.erase(std::unique(work.begin(), work.end()), work.end());
+    std::vector<uint64_t> work;
+    for (;;) {
+        // The live bitmap stands for depth bitsD; the map holds everything
+        // that carries a depth of its own.  Run the smaller of the two, and
+        // adopt an empty bitmap for whatever depth comes next so the common
+        // case stays on the bitmap.
+        const int mapD = bucket.empty() ? (1 << 30) : bucket.begin()->first;
+        int d;
+        bool useBits;
+        if (kNoBits) {
+            // EGTB_NOBITS forces every bucket down the list path, which is the
+            // queue this file had before the bitmap.  It is how the two are
+            // A/B'd against each other, and it is the only way to exercise the
+            // list path on a table whose wake-ups all land on d + 1 -- which,
+            // measured, is all of them.
+            if (mapD == (1 << 30)) break;
+            d = mapD; useBits = false;
+        } else if (nsetCur == 0) {
+            if (mapD == (1 << 30)) break;
+            d = mapD; bitsD = d; useBits = true;
+        } else if (mapD < bitsD) {
+            d = mapD; useBits = false;          // rare: a depth below the bitmap's
+        } else {
+            d = bitsD; useBits = true;
+        }
+
+        Timer tS;
+        if (useBits) {
+            // Fold this depth's listed events into the bitmap, then drain it:
+            // one sorted, de-duplicated queue out of both sources.
+            auto it = bucket.find(d);
+            if (it != bucket.end()) {
+                for (const uint64_t k : it->second) {
+                    U64& wd = bits[cur][(size_t)(k >> 6)];
+                    const U64 mk = (U64)1 << (k & 63);
+                    if (!(wd & mk)) { wd |= mk; ++nsetCur; }
+                }
+                bucket.erase(it);
+            }
+            drainBits(bits[cur], nsetCur, work);
+            nsetCur = 0;
+        } else {
+            auto it = bucket.find(d);
+            work = std::move(it->second);
+            bucket.erase(it);
+            std::sort(work.begin(), work.end());
+            work.erase(std::unique(work.begin(), work.end()), work.end());
+            if (kQueueCount) ++gBackwards;
+        }
+        if (kQueueCount) { gTsort += tS.s(); gAfterUniq += work.size(); ++gBuckets; }
+        if (work.empty()) continue;
         for (auto& v : wk) v.clear();
+        std::fill(nsetT.begin(), nsetT.end(), 0);
+        const int nxt = 1 - cur;
 
         auto run = [&](int q, size_t lo, size_t hi) {
             int B0[4];
             std::vector<int32_t> fblk((size_t)t.w * g.m, -1);
             std::vector<uint8_t> fg0((size_t)t.w * g.m, 0);
             std::vector<Wake>& out = wk[q];
-            U64 lastBlk = (U64)-1, loc = 0;
+            U64 lastBlk = (U64)-1, loc = 0, newb = 0;
+            // Set a bit in the next depth's map; true if this call is what put
+            // it there.  Relaxed is enough: the bit only has to be visible by
+            // the join, which orders it.
+            U64* const nb_ = bits[nxt].data();
+            auto setNext = [&](U64 k) -> bool {
+                std::atomic_ref<U64> r(nb_[k >> 6]);
+                const U64 mk = (U64)1 << (k & 63);
+                return !(r.fetch_or(mk, std::memory_order_relaxed) & mk);
+            };
             for (size_t z = lo; z < hi; ++z) {
                 const U64 key = work[z], i = key >> 1;
                 const int stm = (int)(key & 1);
@@ -756,19 +903,22 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
                 const int mag = nv < 0 ? -nv : nv;
                 forEachPredSlot(g, t, sy, W, B0, stm, [&](U64 pi, int ps) {
                     if (t.get(ps, pi) != UNK) return;
-                    if (nv < 0) { out.push_back({ mag + 1, (uint64_t)((pi << 1) | (U64)ps) }); return; }
-                    if (decOuts(ps, pi)) out.push_back({ mag + 1, (uint64_t)((pi << 1) | (U64)ps) });
+                    const U64 pk = (pi << 1) | (U64)ps;
+                    // mag == d here, so a predecessor woken by this value is a
+                    // win in exactly d + 1: the bitmap's depth.  Outside the
+                    // bitmap path the list still carries the depth.
+                    if (nv >= 0 && !decOuts(ps, pi)) return;
+                    if (useBits) { if (setNext(pk)) ++newb; }
+                    else         out.push_back({ mag + 1, (uint64_t)pk });
                 });
             }
             evalsA += loc;
+            nsetT[(size_t)q] = newb;
+            if (kQueueCount) gWake += newb;
         };
 
-        // Small buckets are not worth eight thread launches.  EGTB_PAR_MIN
-        // lowers the threshold so a sanitiser run can be forced down the
-        // parallel path on a board small enough to run under one.
-        static const size_t parMin =
-            getenv("EGTB_PAR_MIN") ? (size_t)std::atol(getenv("EGTB_PAR_MIN")) : 8192;
-        if (work.size() < parMin || nthr < 2) {
+        Timer tP;
+        if (work.size() < kParMin || nthr < 2) {
             run(0, 0, work.size());
         } else {
             std::vector<std::thread> th;
@@ -779,10 +929,34 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
             }
             for (auto& x : th) x.join();
         }
+        if (kQueueCount) gTpar += tP.s();
+        Timer tM;
         for (auto& v : wk) for (const Wake& e : v) bucket[e.d].push_back(e.key);
+        if (useBits) {
+            U64 tot = 0;
+            for (const U64 c : nsetT) tot += c;
+            cur = nxt; bitsD = d + 1; nsetCur = tot;
+        }
+        if (kQueueCount) gTmerge += tM.s();
     }
     const U64 evals = evalsA.load();
 
+    if (kQueueCount) {
+        const U64 wk_ = gWake.load(), un = gAfterUniq.load();
+        const U64 bu = gBuckets.load(), bk = gBackwards.load();
+        std::fprintf(stderr,
+            "      queue: %llu wake-ups, %llu keys drained over %llu buckets (%llu from the "
+            "list), %llu entries\n",
+            (unsigned long long)wk_, (unsigned long long)un, (unsigned long long)bu,
+            (unsigned long long)bk, (unsigned long long)(2 * t.N));
+        std::fprintf(stderr,
+            "      queue: %.2fs drain, %.2fs serial merge, %.2fs parallel eval "
+            "(serial tail %.0f%% of propagation)\n",
+            gTsort, gTmerge, gTpar,
+            100.0 * (gTsort + gTmerge) / std::max(1e-9, gTsort + gTmerge + gTpar));
+        gTsort = gTmerge = gTpar = 0;
+        gWake = 0; gAfterUniq = 0; gBuckets = 0; gBackwards = 0;
+    }
     if (progress) std::printf("      frontier: %llu evaluations (%.2f per entry)\n",
                               (unsigned long long)evals, (double)evals / (double)(2 * t.N));
     return true;
