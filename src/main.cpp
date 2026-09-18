@@ -2285,10 +2285,14 @@ int cmdKings(int argc, char** argv, bool rooks = false) {
     bool verify = false, brute = false, line = false, progress = false;
     bool quietCensus = false;
     std::string probe;
+    std::string tbDir;                 // a directory of .tb files, or empty
+    bool tbVerify = false;
     for (int i = 0; i < argc; ++i) {
         std::string k = argv[i];
         auto val = [&]() { return (i + 1 < argc) ? std::string(argv[++i]) : std::string(); };
-        if      (k == "--min")      lo = std::atoi(val().c_str());
+        if      (k == "--tb")       tbDir = val();
+        else if (k == "--tb-verify") tbVerify = true;
+        else if (k == "--min")      lo = std::atoi(val().c_str());
         else if (k == "--max")      hi = std::atoi(val().c_str());
         else if (k == "-n")         { lo = hi = std::atoi(val().c_str()); }
         else if (k == "--white")    W = std::atoi(val().c_str());
@@ -2336,6 +2340,7 @@ int cmdKings(int argc, char** argv, bool rooks = false) {
 
     for (int n = lo; n <= hi; ++n) {
         TableKings t(n, W, B, pw, pb);
+        if (!tbDir.empty()) t.store(tbDir, tbVerify);
         t.generate(gThreads, progress);
         t.census(gThreads, verify);
         const KingsStats& s = t.stats();

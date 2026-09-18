@@ -56,6 +56,20 @@
 #include <thread>
 #include <vector>
 
+// Tables are kept on disk as raw arrays so that they can be mapped rather
+// than read; that needs the POSIX calls, which is all this file asks of the
+// platform.
+#if defined(__unix__) || defined(__APPLE__)
+#  include <fcntl.h>
+#  include <sys/mman.h>
+#  include <sys/stat.h>
+#  include <sys/statvfs.h>
+#  include <unistd.h>
+#  define EGTB_HAVE_MMAP 1
+#else
+#  define EGTB_HAVE_MMAP 0
+#endif
+
 namespace kqk {
 namespace {
 
@@ -357,15 +371,26 @@ struct Tbl {
     const Geo* geo = nullptr;
     // One of these two is live; `wide` says which.  Access goes through
     // get()/put(), which speak the wide convention either way.
+    //
+    // Reads go through d8/d16 rather than the vectors, so the storage can be
+    // memory the process owns OR a read-only mapping of a file on disk.  A
+    // mapped table is a finished one loaded to seed a larger generation or to
+    // answer probes; `owned` is false for those and put() refuses them.
     std::vector<S8>  v8[2];
     std::vector<S16> v16[2];
+    S8*  d8[2]  = { nullptr, nullptr };
+    S16* d16[2] = { nullptr, nullptr };
     bool wide = false;
+    bool owned = true;
     U64 legal = 0;                // real positions, orbit weighted
     int maxAbs = 0;
 
     void alloc(U64 n) {
-        wide = false;
-        for (int s = 0; s < 2; ++s) { v16[s].clear(); v16[s].shrink_to_fit(); v8[s].assign(n, N_UNK); }
+        wide = false; owned = true;
+        for (int s = 0; s < 2; ++s) {
+            v16[s].clear(); v16[s].shrink_to_fit(); d16[s] = nullptr;
+            v8[s].assign(n, N_UNK); d8[s] = v8[s].data();
+        }
     }
     // Promote to two bytes, carrying every value already computed.  Called
     // between sweeps, single-threaded, so there is nothing to race with.
@@ -378,16 +403,17 @@ struct Tbl {
                 v16[s][i] = (b == N_UNK) ? UNK : (b == N_ILL) ? ILL : (S16)b;
             }
             v8[s].clear(); v8[s].shrink_to_fit();
+            d8[s] = nullptr; d16[s] = v16[s].data();
         }
         wide = true;
     }
     inline S16 get(int stm, U64 i) const {
-        if (wide) return ld16(v16[stm].data(), i);
-        const S8 b = ld8(v8[stm].data(), i);
+        if (wide) return ld16(d16[stm], i);
+        const S8 b = ld8(d8[stm], i);
         return (b == N_UNK) ? UNK : (b == N_ILL) ? ILL : (S16)b;
     }
     inline void put(int stm, U64 i, S16 x) {
-        if (wide) { st16(v16[stm].data(), i, x); return; }
+        if (wide) { st16(d16[stm], i, x); return; }
         S8 b;
         if      (x == UNK) b = N_UNK;
         else if (x == ILL) b = N_ILL;
@@ -397,7 +423,7 @@ struct Tbl {
             if (x > N_MAX || x < -N_MAX) { std::fprintf(stderr, "kings: narrow overflow %d\n", (int)x); std::abort(); }
             b = (S8)x;
         }
-        st8(v8[stm].data(), i, b);
+        st8(d8[stm], i, b);
     }
 
     // The index splits cleanly in two, and the halves cost wildly different
@@ -443,7 +469,241 @@ struct Tbl {
         return slotIn(blk, g0, B);
     }
     S16 at(const int* W, const int* B, int stm) const { return get(stm, slot(W, B)); }
+
+    // A mapped table keeps its mapping here and gives it back on destruction.
+    void* mapBase = nullptr;
+    size_t mapLen = 0;
+    int mapFd = -1;
+    Tbl() = default;
+    Tbl(const Tbl&) = delete;
+    Tbl& operator=(const Tbl&) = delete;
+    ~Tbl() { unmapIfMapped(); }
+    void unmapIfMapped();
 };
+
+// --------------------------------------------------------------------------
+// Tables on disk.
+// --------------------------------------------------------------------------
+// One file per (w, b) table of a suite.  The Sym tables and the black-set
+// list are rebuilt from (n, w) deterministically, so only the two value
+// arrays are stored; the header carries enough of the index for a reader to
+// refuse a file written against a different one.
+//
+// The payload is raw rather than compressed, because the point of keeping
+// these is to use them.  A stored sub-table seeds a larger generation and a
+// stored table answers probes, and both want random access into the middle of
+// it.  Raw also lets the file be MAPPED rather than read, which matters twice
+// over: the process does not pay for the bytes in its own memory, and the
+// pages are clean, so the kernel can drop and re-read them instead of
+// compressing them -- which is the regime the big boards are already in.  For
+// archiving, the files compress well with any ordinary tool, and the
+// measurement is in the README.
+struct TbHeader {
+    char    magic[8];        // "KINGSTB"
+    U32     version;
+    U32     n, w, b;
+    U32     pieceW, pieceB;
+    U32     wide;            // 0: one byte an entry, 1: two
+    U32     pad;             // explicit, so the layout is not the compiler's choice
+    U64     N, nblk, nb;
+    U64     legal;           // orbit-weighted legal count: fingerprints the index
+    int64_t maxAbs;
+    U64     hash;            // over the payload, for the archival case
+};
+static_assert(sizeof(TbHeader) == 88, "the on-disk header is fixed at 88 bytes");
+static const U32 TB_VERSION = 1;
+
+// Not a cryptographic hash -- it is here to catch a truncated or corrupted
+// file, which is the failure an external drive actually produces.
+static U64 tbHash(const void* p, size_t nbytes) {
+    const unsigned char* q = (const unsigned char*)p;
+    U64 h = 0x9e3779b97f4a7c15ull;
+    size_t i = 0;
+    for (; i + 8 <= nbytes; i += 8) {
+        U64 wv; std::memcpy(&wv, q + i, 8);
+        h ^= wv; h *= 0xff51afd7ed558ccdull; h ^= h >> 29;
+    }
+    for (; i < nbytes; ++i) { h ^= q[i]; h *= 0x100000001b3ull; }
+    return h;
+}
+
+// KKKKvK-n15.tb, RRvN-n20.tb: the same spelling the census tables use.
+static std::string tbName(int w, int b, int pw, int pb, int n) {
+    std::string s;
+    for (int i = 0; i < w; ++i) s += capPieceLetter(pw);
+    s += 'v';
+    for (int i = 0; i < b; ++i) s += capPieceLetter(pb);
+    char tail[32];
+    std::snprintf(tail, sizeof tail, "-n%d.tb", n);
+    return s + tail;
+}
+
+void Tbl::unmapIfMapped() {
+#if EGTB_HAVE_MMAP
+    if (mapBase) { munmap(mapBase, mapLen); mapBase = nullptr; mapLen = 0; }
+    if (mapFd >= 0) { close(mapFd); mapFd = -1; }
+#endif
+}
+
+// Free bytes on the filesystem holding `dir`, or ~0 when that cannot be told
+// -- in which case the caller goes ahead and lets the write fail honestly.
+static U64 tbFreeBytes(const std::string& dir) {
+#if EGTB_HAVE_MMAP
+    struct statvfs v{};
+    if (statvfs(dir.c_str(), &v) != 0) return ~(U64)0;
+    return (U64)v.f_bavail * (U64)v.f_frsize;
+#else
+    (void)dir; return ~(U64)0;
+#endif
+}
+
+static U64 tbBytes(U64 N, bool wide) { return sizeof(TbHeader) + 2ull * N * (wide ? 2 : 1); }
+
+static std::string tbMB(U64 b) {
+    char s[48];
+    if      (b >= (1ull << 30)) std::snprintf(s, sizeof s, "%.1f GB", (double)b / (double)(1ull << 30));
+    else if (b >= (1ull << 20)) std::snprintf(s, sizeof s, "%.1f MB", (double)b / (double)(1ull << 20));
+    else                        std::snprintf(s, sizeof s, "%.0f KB", (double)b / 1024.0);
+    return s;
+}
+
+// Write one table.  Streamed in blocks rather than one enormous call, so that
+// a short write on a full or detached drive is reported where it happened.
+static bool tbSave(const Tbl& t, const std::string& path, bool progress) {
+    const size_t esz = t.wide ? 2 : 1;
+    TbHeader h{};
+    std::memcpy(h.magic, "KINGSTB", 8);
+    h.version = TB_VERSION;
+    h.n = (U32)t.n; h.w = (U32)t.w; h.b = (U32)t.b;
+    h.pieceW = (U32)t.geo->pc[0]; h.pieceB = (U32)t.geo->pc[1];
+    h.wide = t.wide ? 1u : 0u; h.pad = 0;
+    h.N = t.N; h.nblk = t.nblk; h.nb = t.nb;
+    h.legal = t.legal; h.maxAbs = t.maxAbs;
+    h.hash = 0;
+    for (int sm = 0; sm < 2; ++sm) {
+        const void* q = t.wide ? (const void*)t.d16[sm] : (const void*)t.d8[sm];
+        h.hash ^= tbHash(q, (size_t)t.N * esz);
+    }
+
+    // Refuse rather than discover it at byte five billion.  An external drive
+    // that fills up mid-write is the failure this is here for.
+    {
+        const size_t cut = path.rfind('/');
+        const std::string dir = cut == std::string::npos ? std::string(".") : path.substr(0, cut);
+        const U64 need = tbBytes(t.N, t.wide), free_ = tbFreeBytes(dir);
+        if (free_ != ~(U64)0 && free_ < need) {
+            std::fprintf(stderr,
+                         "kings: not saving %s -- it needs %s and %s has %s free\n",
+                         path.c_str(), tbMB(need).c_str(), dir.c_str(), tbMB(free_).c_str());
+            return false;
+        }
+    }
+
+    const std::string tmp = path + ".part";
+    std::FILE* f = std::fopen(tmp.c_str(), "wb");
+    if (!f) { std::fprintf(stderr, "kings: cannot write %s\n", tmp.c_str()); return false; }
+    auto bail = [&](const char* what) {
+        std::fclose(f); std::remove(tmp.c_str());
+        std::fprintf(stderr, "kings: %s writing %s\n", what, tmp.c_str());
+        return false;
+    };
+    if (std::fwrite(&h, sizeof h, 1, f) != 1) return bail("short write");
+    const size_t BLK = 8u << 20;
+    for (int sm = 0; sm < 2; ++sm) {
+        const char* q = t.wide ? (const char*)t.d16[sm] : (const char*)t.d8[sm];
+        size_t left = (size_t)t.N * esz;
+        while (left) {
+            const size_t k = left < BLK ? left : BLK;
+            if (std::fwrite(q, 1, k, f) != k) return bail("short write");
+            q += k; left -= k;
+        }
+    }
+    if (std::fflush(f) != 0) return bail("flush failed");
+    std::fclose(f);
+    if (std::rename(tmp.c_str(), path.c_str()) != 0) {
+        std::remove(tmp.c_str());
+        std::fprintf(stderr, "kings: cannot rename %s into place\n", tmp.c_str());
+        return false;
+    }
+    if (progress)
+        std::printf("      saved %s  %.1f MB\n", path.c_str(),
+                    (double)(sizeof(TbHeader) + 2 * (size_t)t.N * esz) / (1024.0 * 1024.0));
+    return true;
+}
+
+// Map one table for reading.  The shape must already be set on `t` -- the
+// header is checked against it, so a file belonging to another board, another
+// piece or another index is refused rather than silently misread.
+static bool tbMap(Tbl& t, const std::string& path, bool verifyHash, bool progress) {
+#if !EGTB_HAVE_MMAP
+    (void)t; (void)path; (void)verifyHash; (void)progress;
+    return false;
+#else
+    const int fd = open(path.c_str(), O_RDONLY);
+    if (fd < 0) return false;                     // absent is not an error
+    struct stat st{};
+    if (fstat(fd, &st) != 0) { close(fd); return false; }
+    auto refuse = [&](const char* why) {
+        close(fd);
+        std::fprintf(stderr, "kings: %s: %s\n", path.c_str(), why);
+        return false;
+    };
+    if ((U64)st.st_size < sizeof(TbHeader)) return refuse("too short to hold a header");
+
+    void* base = mmap(nullptr, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (base == MAP_FAILED) return refuse("cannot map");
+    auto reject = [&](const char* why) {
+        munmap(base, (size_t)st.st_size);
+        close(fd);
+        std::fprintf(stderr, "kings: %s: %s\n", path.c_str(), why);
+        return false;
+    };
+    TbHeader h{};
+    std::memcpy(&h, base, sizeof h);
+    if (std::memcmp(h.magic, "KINGSTB", 8) != 0) return reject("not a kings table");
+    if (h.version != TB_VERSION)                 return reject("unknown format version");
+    if ((int)h.n != t.n || (int)h.w != t.w || (int)h.b != t.b)
+        return reject("written for a different board or material");
+    if ((int)h.pieceW != t.geo->pc[0] || (int)h.pieceB != t.geo->pc[1])
+        return reject("written for different pieces");
+    // The index is rebuilt here, not stored, so these three are what say the
+    // rebuilt one agrees with the one the file was written against.
+    if (h.N != t.N || h.nblk != t.nblk || h.nb != t.nb)
+        return reject("written against a different index");
+    const size_t esz = h.wide ? 2 : 1;
+    const U64 want = sizeof(TbHeader) + 2ull * h.N * esz;
+    if ((U64)st.st_size != want) return reject("wrong length for its header");
+
+    char* pay = (char*)base + sizeof(TbHeader);
+    if (verifyHash) {
+        U64 got = 0;
+        for (int sm = 0; sm < 2; ++sm) got ^= tbHash(pay + (size_t)sm * h.N * esz, (size_t)h.N * esz);
+        if (got != h.hash) return reject("payload hash does not match: truncated or corrupt");
+    }
+
+    t.unmapIfMapped();
+    t.mapBase = base; t.mapLen = (size_t)st.st_size; t.mapFd = fd;
+    t.wide = h.wide != 0;
+    t.owned = false;
+    t.legal = h.legal;
+    t.maxAbs = (int)h.maxAbs;
+    for (int sm = 0; sm < 2; ++sm) {
+        char* q = pay + (size_t)sm * h.N * esz;
+        if (t.wide) { t.d16[sm] = (S16*)q; t.d8[sm] = nullptr; }
+        else        { t.d8[sm] = (S8*)q;  t.d16[sm] = nullptr; }
+    }
+    // Probing and seeding both jump about, so say so and let the kernel stop
+    // reading ahead.
+    madvise(base, (size_t)st.st_size, MADV_RANDOM);
+    if (progress)
+        std::printf("      mapped %s  %.1f MB%s\n", path.c_str(),
+                    (double)st.st_size / (1024.0 * 1024.0),
+                    verifyHash ? " (hash ok)" : "");
+    return true;
+#endif
+}
+
+
 
 // The value of a move is what it does to the opponent: leave them lost in k and
 // I win in k+1; if every move leaves them winning, I lose by the slowest.
@@ -1419,22 +1679,91 @@ struct Suite {
     Sym sym[5];
     bool have[5][3] = {};
     int W = 0, B = 0;
+    std::string store;            // a directory of .tb files, or empty
+    bool storeVerify = false;     // check the payload hash on the way in
 
     Suite(int n, int w, int b, int pw, int pb) : g(n, pw, pb), W(w), B(b) {
         for (int k = 1; k <= W; ++k) buildSym(g, k, sym[k]);
     }
 
+    // Everything about a table except its values.  The solver sets this on its
+    // way in; a table coming off disk needs it set first, so that the header
+    // can be checked against the index this run would build.
+    void shape(int w, int b) {
+        Tbl& T = t[w][b];
+        T.w = w; T.b = b;
+        T.n = g.n; T.m = g.m; T.geo = &g; T.sym = &sym[w];
+        T.nb = (U64)Ck(g.m, b); T.nblk = sym[w].nblk; T.N = T.nblk * T.nb;
+    }
+
     const Tbl* capWof(int w, int b) const { return b > 1 ? &t[w][b - 1] : nullptr; }
     const Tbl* capBof(int w, int b) const { return w > 1 ? &t[w - 1][b] : nullptr; }
 
+    // Before solving anything, add up what the store will be asked to hold and
+    // compare it with what the drive has.  A table is written only when it is
+    // finished, so without this the run discovers a full disk after the hours
+    // that produced the largest table in the lattice.  Whether a table needs
+    // one byte an entry or two is not known until it is solved, so both totals
+    // are given: short of the smaller one is certain failure and refused,
+    // short of the larger one is possible failure and only said out loud.
+    bool storeFits(bool progress) const {
+        if (store.empty()) return true;
+        U64 lo = 0, hi = 0;
+        for (int w = 1; w <= W; ++w)
+            for (int b = 1; b <= B; ++b) {
+                const std::string path = store + "/" + tbName(w, b, g.pc[0], g.pc[1], g.n);
+                std::FILE* f = std::fopen(path.c_str(), "rb");
+                if (f) { std::fclose(f); continue; }         // already there
+                const U64 N = (U64)sym[w].nblk * (U64)Ck(g.m, b);
+                lo += tbBytes(N, false);
+                hi += tbBytes(N, true);
+            }
+        const U64 free_ = tbFreeBytes(store);
+        if (free_ == ~(U64)0) return true;                   // cannot tell; go ahead
+        if (free_ < lo) {
+            std::fprintf(stderr,
+                         "kings: %s has %s free; this run needs at least %s "
+                         "(up to %s if the tables exceed 126 plies).  Nothing written.\n",
+                         store.c_str(), tbMB(free_).c_str(), tbMB(lo).c_str(), tbMB(hi).c_str());
+            return false;
+        }
+        if (free_ < hi)
+            std::fprintf(stderr,
+                         "kings: %s has %s free; this run needs %s, or up to %s should the "
+                         "tables exceed 126 plies and widen to two bytes an entry.\n",
+                         store.c_str(), tbMB(free_).c_str(), tbMB(lo).c_str(), tbMB(hi).c_str());
+        else if (progress)
+            std::printf("      store %s: %s free, this run adds %s\n",
+                        store.c_str(), tbMB(free_).c_str(), tbMB(lo).c_str());
+        return true;
+    }
+
     void build(int nthr, bool progress) {
+        if (!storeFits(progress))
+            throw std::runtime_error("kings: not enough room on the table store");
         for (int tot = 2; tot <= W + B; ++tot)
             for (int w = 1; w <= W; ++w) {
                 int b = tot - w;
                 if (b < 1 || b > B) continue;
-                t[w][b].w = w; t[w][b].b = b;
+                shape(w, b);
                 Timer tm;
                 Tbl& T = t[w][b];
+                // A table already on disk is used as it stands.  That is the
+                // point of keeping them: generating (w, b) needs (w, b-1) and
+                // (w-1, b) solved first, and those are the same tables every
+                // time.  Mapped rather than read, so they cost the process no
+                // memory of its own.
+                if (!store.empty()) {
+                    const std::string path = store + "/" + tbName(w, b, g.pc[0], g.pc[1], g.n);
+                    if (tbMap(T, path, storeVerify, progress)) {
+                        have[w][b] = true;
+                        if (progress)
+                            std::printf("   loaded K%d vs K%d: %llu slots/side (%llu positions), "
+                                        "deepest %d ply\n", w, b, (unsigned long long)T.N,
+                                        (unsigned long long)T.legal, T.maxAbs);
+                        continue;
+                    }
+                }
                 const Tbl* cW = capWof(w, b);
                 const Tbl* cB = capBof(w, b);
                 int sm2 = 0;
@@ -1516,6 +1845,8 @@ struct Suite {
                     solve(g, T, sym[w], cW, cB, nthr, progress);
                 }
                 have[w][b] = true;
+                if (!store.empty())
+                    tbSave(T, store + "/" + tbName(w, b, g.pc[0], g.pc[1], g.n), progress);
                 if (progress)
                     std::printf("   built K%d vs K%d: %llu slots/side (%llu positions), deepest %d ply, %.2f s\n",
                                 w, b, (unsigned long long)t[w][b].N,
@@ -1833,6 +2164,11 @@ TableKings::TableKings(int edge, int whiteMen, int blackMen, int whitePiece, int
             throw std::runtime_error("capture: n is too large for the move buffer");
 }
 TableKings::~TableKings() = default;
+
+void TableKings::store(const std::string& dir, bool verify) {
+    p->s.store = dir;
+    p->s.storeVerify = verify;
+}
 
 void TableKings::generate(int threads, bool progress) {
     Timer tm;

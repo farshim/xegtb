@@ -651,6 +651,11 @@ public:
     void generate(int threads, bool progress);
     void census(int threads, bool verify);
 
+    // Use `dir` as a store of .tb files: any table of the lattice already
+    // there is mapped and used as it stands, and any table solved here is
+    // written back.  `verify` checks the payload hash on the way in.
+    void store(const std::string& dir, bool verify);
+
     const KingsStats& stats() const;              // the (w, b) table itself
     const KingsStats& subStats(int w, int b) const;   // one of its conversions
 
