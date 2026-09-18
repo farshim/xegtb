@@ -780,13 +780,13 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
         const double M = 1.0 / (1024.0 * 1024.0);
         std::fprintf(stderr,
             "      mem  %d v %d  n=%d:  N=%llu slots, nblk=%llu, nb=%llu, C(m,w)=%llu\n"
-            "      mem    values %8.0f MB   outs %8.0f MB   bitmap  %8.0f MB\n"
+            "      mem    values %8.0f MB   outs %8.0f MB   bitmaps %8.0f MB\n"
             "      mem    blockOf %7.0f MB   gTo  %8.0f MB   blkSq   %8.0f MB   wt %6.0f MB\n",
             t.w, t.b, t.n, (unsigned long long)t.N, (unsigned long long)t.nblk,
             (unsigned long long)t.nb, (unsigned long long)sy.nw,
             (double)(t.wide ? 4 : 2) * (double)t.N * M,
             2.0 * (double)t.N * M,
-            (double)((2 * t.N + 63) / 64) * 8.0 * M,
+            2.0 * (double)((2 * t.N + 63) / 64) * 8.0 * M,
             (double)sy.blockOf.size() * 4.0 * M, (double)sy.gTo.size() * M,
             (double)sy.blkSq.size() * 4.0 * M, (double)sy.wt.size() * M);
     }
@@ -818,67 +818,27 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
     static const size_t kParMin =
         getenv("EGTB_PAR_MIN") ? (size_t)std::atol(getenv("EGTB_PAR_MIN")) : 8192;
 
-    // One bitmap, not two.  The depth being drained and the depth being
-    // filled never overlap in time: drainBits materialises the whole queue
-    // into `work` and zeroes the bitmap before any wake-up for the next depth
-    // is written, so the same array serves both ends.
+    // Two bitmaps, and the queue is never materialised as a list.  The
+    // propagation claims ranges of WORDS of the depth being run, iterates the
+    // bits it finds and zeroes them as it goes, so the keys arrive in
+    // increasing slot order -- which is block order, what the frame memo
+    // wants -- without ever existing as an array.  That array was the largest
+    // transient left: 2705 MB on KKKK v K n=15, against 698 MB for the second
+    // bitmap this needs.
+    //
+    // Two are needed because a wake-up for d + 1 can land on a word the scan
+    // has not reached yet.  With one bitmap that slot would be run at depth d,
+    // which is not wrong -- it would be re-queued at its own depth -- but it
+    // is wasted work on roughly half of all wake-ups.
     const U64 nkey = 2 * t.N;
-    std::vector<U64> bits;
-    bits.assign((size_t)((nkey + 63) / 64), 0);
-    int bitsD = -1;
+    const size_t nword = (size_t)((nkey + 63) / 64);
+    std::vector<U64> bits[2];
+    bits[0].assign(nword, 0);
+    bits[1].assign(nword, 0);
+    int cur = 0, bitsD = -1;
     U64 nsetCur = 0;
     std::vector<U64> nsetT((size_t)nthr, 0);
-
-    // Materialise one depth's queue from its bitmap, in increasing key order,
-    // and clear the bitmap as it goes.  Two streaming passes: popcount each
-    // thread's word range to find where its output starts, then fill.
-    auto drainBits = [&](std::vector<U64>& bm, U64 count, std::vector<uint64_t>& out) {
-        out.resize((size_t)count);
-        if (!count) { std::fill(bm.begin(), bm.end(), 0); return; }
-        const size_t nw = bm.size();
-        const int P = (count < (U64)kParMin || nthr < 2) ? 1 : nthr;
-        const size_t chunk = (nw + P - 1) / P;
-        std::vector<U64> off((size_t)P + 1, 0);
-        auto pass1 = [&](int q) {
-            const size_t lo = std::min((size_t)q * chunk, nw), hi = std::min(lo + chunk, nw);
-            U64 c = 0;
-            for (size_t z = lo; z < hi; ++z) c += (U64)__builtin_popcountll(bm[z]);
-            off[(size_t)q + 1] = c;
-        };
-        auto pass2 = [&](int q) {
-            const size_t lo = std::min((size_t)q * chunk, nw), hi = std::min(lo + chunk, nw);
-            U64 at = off[(size_t)q];
-            for (size_t z = lo; z < hi; ++z) {
-                U64 wv = bm[z];
-                if (!wv) continue;
-                bm[z] = 0;
-                do { const int b = __builtin_ctzll(wv); wv &= wv - 1;
-                     out[(size_t)at++] = ((U64)z << 6) | (U64)b; } while (wv);
-            }
-        };
-        if (P == 1) pass1(0);
-        else {
-            std::vector<std::thread> th;
-            for (int q = 0; q < P; ++q) th.emplace_back(pass1, q);
-            for (auto& x : th) x.join();
-        }
-        for (int q = 0; q < P; ++q) off[(size_t)q + 1] += off[(size_t)q];
-        // `count` is carried along as bits are set, one increment per 0 -> 1
-        // transition, rather than recounted here; this is where the two meet.
-        // Getting it wrong would size `out` wrongly, so say so rather than
-        // write past it or leave a stale key in the tail.
-        if (off[(size_t)P] != count) {
-            std::fprintf(stderr, "kings: frontier bitmap holds %llu bits, expected %llu\n",
-                         (unsigned long long)off[(size_t)P], (unsigned long long)count);
-            std::abort();
-        }
-        if (P == 1) { pass2(0); return; }
-        {
-            std::vector<std::thread> th;
-            for (int q = 0; q < P; ++q) th.emplace_back(pass2, q);
-            for (auto& x : th) x.join();
-        }
-    };
+    static const U64 WGRAIN = 256;           // bitmap words claimed at a time
 
     // ---- init: one forward evaluation per entry ------------------------
     struct Ev { U64 key; int d; };
@@ -891,7 +851,7 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
             Frames fr; fr.alloc(g, t);
             U64 lo, hi;
             std::vector<Ev>& ev = tev[q];
-            U64* const sb = bits.data();
+            U64* const sb = bits[0].data();
             U64 seeds = 0;
             auto setSeed = [&](U64 k) -> bool {
                 std::atomic_ref<U64> r(sb[k >> 6]);
@@ -1030,7 +990,7 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
         return false;
     };
 
-    std::vector<uint64_t> work;
+    std::vector<uint64_t> listWork;          // only the rare list path needs one
     for (;;) {
         // The live bitmap stands for depth bitsD; the map holds everything
         // that carries a depth of its own.  Run the smaller of the two, and
@@ -1058,31 +1018,31 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
 
         Timer tS;
         if (useBits) {
-            // Fold this depth's listed events into the bitmap, then drain it:
-            // one sorted, de-duplicated queue out of both sources.
+            // Fold this depth's listed events into its bitmap; the scan below
+            // then takes both sources as one sorted, de-duplicated queue.
             auto it = bucket.find(d);
             if (it != bucket.end()) {
                 for (const uint64_t k : it->second) {
-                    U64& wd = bits[(size_t)(k >> 6)];
+                    U64& wd = bits[cur][(size_t)(k >> 6)];
                     const U64 mk = (U64)1 << (k & 63);
                     if (!(wd & mk)) { wd |= mk; ++nsetCur; }
                 }
                 bucket.erase(it);
             }
-            drainBits(bits, nsetCur, work);
-            nsetCur = 0;
         } else {
             auto it = bucket.find(d);
-            work = std::move(it->second);
+            listWork = std::move(it->second);
             bucket.erase(it);
-            std::sort(work.begin(), work.end());
-            work.erase(std::unique(work.begin(), work.end()), work.end());
+            std::sort(listWork.begin(), listWork.end());
+            listWork.erase(std::unique(listWork.begin(), listWork.end()), listWork.end());
             if (kQueueCount) ++gBackwards;
         }
-        if (kQueueCount) { gTsort += tS.s(); gAfterUniq += work.size(); ++gBuckets; }
-        if (work.empty()) continue;
+        const U64 todo = useBits ? nsetCur : (U64)listWork.size();
+        if (kQueueCount) { gTsort += tS.s(); gAfterUniq += todo; ++gBuckets; }
+        if (!todo) continue;
         for (auto& v : wk) v.clear();
         std::fill(nsetT.begin(), nsetT.end(), 0);
+        const int nxt = 1 - cur;
 
         auto run = [&](int q, auto& claim) {
             int B0[4];
@@ -1092,18 +1052,16 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
             // Set a bit in the next depth's map; true if this call is what put
             // it there.  Relaxed is enough: the bit only has to be visible by
             // the join, which orders it.
-            U64* const nb_ = bits.data();
+            U64* const nb_ = bits[nxt].data();
             auto setNext = [&](U64 k) -> bool {
                 std::atomic_ref<U64> r(nb_[k >> 6]);
                 const U64 mk = (U64)1 << (k & 63);
                 return !(r.fetch_or(mk, std::memory_order_relaxed) & mk);
             };
-            U64 lo, hi;
-            while (claim(lo, hi)) {
-                for (U64 z = lo; z < hi; ++z) {
-                    const U64 key = work[(size_t)z], i = key >> 1;
+            auto one = [&](const U64 key) {
+                    const U64 i = key >> 1;
                     const int stm = (int)(key & 1);
-                    if (t.get(stm, i) != UNK) continue;
+                    if (t.get(stm, i) != UNK) return;
                     const U64 blk = i / t.nb, br = i % t.nb;
                     const int* W = (const int*)&sy.blkSq[(size_t)blk * t.w];
                     for (int z2 = 0; z2 < t.b; ++z2) B0[z2] = bset[(size_t)br * t.b + z2];
@@ -1116,20 +1074,20 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
                     // makes `a.best` the true shortest win when it is taken.
                     S16 nv;
                     if (a.best) {
-                        if (a.best != d) { out.push_back({ a.best, key }); continue; }
+                        if (a.best != d) { out.push_back({ a.best, key }); return; }
                         nv = (S16)a.best;
                     } else if (a.anyUnknown) {
                         std::atomic_ref<uint8_t>(outs[stm][i])
                             .store((uint8_t)a.notWin, std::memory_order_relaxed);
-                        continue;
+                        return;
                     } else if (!a.moves || a.anyDraw) {
                         nv = 0;
                     } else {
-                        if (a.worst != d) { out.push_back({ a.worst, key }); continue; }
+                        if (a.worst != d) { out.push_back({ a.worst, key }); return; }
                         nv = (S16)-a.worst;
                     }
                     t.put(stm, i, nv);
-                    if (nv == 0) continue;
+                    if (nv == 0) return;
                     const int mag = nv < 0 ? -nv : nv;
                     forEachPredSlot(g, t, sy, W, B0, stm, &fr, [&](U64 pi, int ps) {
                         if (t.get(ps, pi) != UNK) return;
@@ -1141,7 +1099,24 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
                         if (useBits) { if (setNext(pk)) ++newb; }
                         else         out.push_back({ mag + 1, (uint64_t)pk });
                     });
-                }
+            };
+
+            U64 lo, hi;
+            if (useBits) {
+                // A word belongs to exactly one thread for the whole round, so
+                // it can be read and zeroed with no atomic.
+                U64* const bc = bits[cur].data();
+                while (claim(lo, hi))
+                    for (U64 z = lo; z < hi; ++z) {
+                        U64 wv = bc[(size_t)z];
+                        if (!wv) continue;
+                        bc[(size_t)z] = 0;
+                        do { const int bb = __builtin_ctzll(wv); wv &= wv - 1;
+                             one(((U64)z << 6) | (U64)bb); } while (wv);
+                    }
+            } else {
+                while (claim(lo, hi))
+                    for (U64 z = lo; z < hi; ++z) one(listWork[(size_t)z]);
             }
             evalsA += loc;
             nsetT[(size_t)q] = newb;
@@ -1152,10 +1127,11 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
         // The keys are in slot order, so a chunk of them mostly shares a block
         // and reuses the frame memo; a thousand is enough to bury the atomic
         // and still leaves a short tail.
-        parDyn(work.size() < kParMin ? 1 : nthr, work.size(), 1024, run);
+        if (useBits) parDyn(todo < kParMin ? 1 : nthr, (U64)nword, WGRAIN, run);
+        else         parDyn(todo < kParMin ? 1 : nthr, todo, 1024, run);
         if (kQueueCount) gTpar += tP.s();
         {
-            const U64 lw = (U64)work.capacity() * 8;
+            const U64 lw = (U64)listWork.capacity() * 8;
             U64 lb = 0, lk = 0;
             for (const auto& kv : bucket) lb += (U64)kv.second.capacity() * 8;
             for (const auto& v : wk) lk += (U64)v.capacity() * sizeof(Wake);
@@ -1166,7 +1142,7 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
         if (useBits) {
             U64 tot = 0;
             for (const U64 c : nsetT) tot += c;
-            bitsD = d + 1; nsetCur = tot;
+            cur = nxt; bitsD = d + 1; nsetCur = tot;
         }
         if (kQueueCount) gTmerge += tM.s();
     }
@@ -1175,7 +1151,7 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
         const double M = 1.0 / (1024.0 * 1024.0);
         std::fprintf(stderr,
             "      mem    TRANSIENT: init events %6.0f MB, transfer %6.0f MB, queue peak %6.0f MB"
-            " = work %5.0f + buckets %5.0f + wake lists %5.0f\n",
+            " = list %5.0f + buckets %5.0f + wake lists %5.0f\n",
             (double)memTev * M, (double)memXfer * M, (double)memPeak * M,
             (double)memWork * M, (double)memBuck * M, (double)memWk * M);
     }
