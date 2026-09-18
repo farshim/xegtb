@@ -644,7 +644,6 @@ static inline void evalPos(const Geo& g, const Tbl& t, const Tbl* capW, const Tb
 // (w, b-1) and Black taking a white man to (w-1, b), both other tables.  So
 // the in-table successor graph is the non-capture move graph and its reverse
 // is the same generator run backwards.
-static const int FR_FANOUT = 255;    // outs is a byte
 
 // A white set with a nontrivial stabiliser has its orbit spread over several
 // slots, and t.slot() names only one of them.  A wake-up must reach all of
@@ -774,8 +773,25 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
     }
 
     t.alloc(t.N);
-    std::vector<uint8_t> outs[2];
-    for (int s = 0; s < 2; ++s) outs[s].assign(t.N, 0);
+    // One NIBBLE per slot, not one byte.  Byte i carries both of slot i's
+    // counters -- the low nibble for White to move, the high for Black -- so
+    // the array is N bytes rather than 2N.  On KKKK v K n=15 that is 2790 MB
+    // of a 15.5 GB peak.
+    //
+    // Fifteen means saturated, and a saturated counter never decrements: it
+    // reports a trigger every time instead.  That is safe for the same reason
+    // the whole scheme is safe -- the counter is a trigger, never an oracle,
+    // and a fired event re-runs the ordinary forward evaluation -- so
+    // saturating can only cost extra evaluations, never a wrong value.  It
+    // costs them only for a slot with more than fourteen moves not known to
+    // lose that ALSO has a successor winning for the opponent, since that is
+    // the only thing that decrements a counter.  On the w-versus-1 tables
+    // that combination does not arise: White's moves are the wide ones, and
+    // in those tables Black never wins, so White's counters are never
+    // touched.  Saturation is also what replaces the old FR_FANOUT bail-out.
+    std::vector<uint8_t> outs;
+    outs.assign((size_t)t.N, 0);
+    static const uint8_t OUT_SAT = 15;
     if (getenv("EGTB_MEM")) {
         const double M = 1.0 / (1024.0 * 1024.0);
         std::fprintf(stderr,
@@ -785,7 +801,7 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
             t.w, t.b, t.n, (unsigned long long)t.N, (unsigned long long)t.nblk,
             (unsigned long long)t.nb, (unsigned long long)sy.nw,
             (double)(t.wide ? 4 : 2) * (double)t.N * M,
-            2.0 * (double)t.N * M,
+            1.0 * (double)t.N * M,
             2.0 * (double)((2 * t.N + 63) / 64) * 8.0 * M,
             (double)sy.blockOf.size() * 4.0 * M, (double)sy.gTo.size() * M,
             (double)sy.blkSq.size() * 4.0 * M, (double)sy.wt.size() * M);
@@ -869,8 +885,13 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
                         for (int stm = 0; stm < 2; ++stm) {
                             Acc a;
                             evalPos(g, t, capW, capB, W, B, stm, a, (int)blk, fr);
-                            if (a.notWin > FR_FANOUT) { tooWide = true; return; }
-                            outs[stm][i] = (uint8_t)a.notWin;
+                            {   // this thread settles both sides of slot i,
+                                // so it owns the whole byte
+                                const uint8_t c = (uint8_t)(a.notWin > 14 ? OUT_SAT : a.notWin);
+                                const int sh = stm * 4;
+                                outs[(size_t)i] = (uint8_t)((outs[(size_t)i] & (uint8_t)~(0xF << sh))
+                                                            | (c << sh));
+                            }
                             // Exactly the sweep's precedence.  `best` first: a
                             // drawn conversion in hand does NOT settle a position
                             // that also has a win, and an unresolved successor
@@ -981,13 +1002,17 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
     std::vector<std::vector<Wake>> wk(nthr);
     std::atomic<U64> evalsA{0};
     auto decOuts = [&](int ps, U64 pi) -> bool {          // true iff it just hit zero
-        std::atomic_ref<uint8_t> r(outs[ps][pi]);
+        std::atomic_ref<uint8_t> r(outs[(size_t)pi]);
+        const int sh = ps * 4;
+        const uint8_t keep = (uint8_t)~(0xF << sh);
         uint8_t v = r.load(std::memory_order_relaxed);
-        while (v) {
-            if (r.compare_exchange_weak(v, (uint8_t)(v - 1), std::memory_order_relaxed))
-                return v == 1;
+        for (;;) {
+            const uint8_t c = (uint8_t)((v >> sh) & 0xF);
+            if (c == 0) return false;
+            if (c == OUT_SAT) return true;        // saturated: trigger every time
+            const uint8_t nv = (uint8_t)((v & keep) | ((c - 1) << sh));
+            if (r.compare_exchange_weak(v, nv, std::memory_order_relaxed)) return c == 1;
         }
-        return false;
     };
 
     std::vector<uint64_t> listWork;          // only the rare list path needs one
@@ -1077,8 +1102,17 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
                         if (a.best != d) { out.push_back({ a.best, key }); return; }
                         nv = (S16)a.best;
                     } else if (a.anyUnknown) {
-                        std::atomic_ref<uint8_t>(outs[stm][i])
-                            .store((uint8_t)a.notWin, std::memory_order_relaxed);
+                        {   // another thread may own the other nibble of this
+                            // byte, so the self-heal has to go in under a CAS
+                            const uint8_t c = (uint8_t)(a.notWin > 14 ? OUT_SAT : a.notWin);
+                            const int sh = stm * 4;
+                            const uint8_t keep = (uint8_t)~(0xF << sh);
+                            std::atomic_ref<uint8_t> r(outs[(size_t)i]);
+                            uint8_t v = r.load(std::memory_order_relaxed);
+                            while (!r.compare_exchange_weak(
+                                       v, (uint8_t)((v & keep) | (c << sh)),
+                                       std::memory_order_relaxed)) {}
+                        }
                         return;
                     } else if (!a.moves || a.anyDraw) {
                         nv = 0;
