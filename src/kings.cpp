@@ -434,12 +434,80 @@ struct Acc {
     inline void winNow() { ++moves; ++notWin; if (!best || best > 1) best = 1; }
 };
 
+// --------------------------------------------------------------------------
+// Per-block memo of everything that does not depend on where Black stands.
+// --------------------------------------------------------------------------
+// The sweep holds one white set fixed while it runs through every black set
+// in the block -- C(m, b) of them, 196 at b = 1, n = 14.  White's successors
+// are the same perturbations of that one white set every time, so their
+// frames are the same too, and computing them once a block instead of once a
+// black set removes almost all of the random gathering into sym->blockOf.
+//
+// Built with no enemy man on the board, which yields a SUPERSET of the
+// destinations any real position in the block offers: a black man can only
+// block a ray or be captured on it, never open one.  So every (j, dst) the
+// sweep actually asks for is present.
+//
+// For a king or a knight that superset is exact, since a black man can stand
+// on the target square but cannot open or close a jump.  So the memo also
+// keeps a FLAT list of White's successors -- destination square, and the
+// frame of the white set it produces -- and evalPos walks that instead of
+// regenerating the moves and re-deriving the frames.  All that is left per
+// successor is the one test of whether Black stands on the destination.  A
+// slider gets no flat list: a black man blocks the ray beyond it, so the
+// superset is not exact and the moves must be generated against the real
+// position.
+struct Frames {
+    std::vector<int32_t> blk;         // [j * m + dst] -> block of the moved set
+    std::vector<uint8_t> g0;          // [j * m + dst] -> element carrying it
+    std::vector<int32_t> fdst, ffb;   // flat list: destination, its block
+    std::vector<uint8_t> ffg;         // flat list: its group element
+    int nflat = 0;
+    bool flat = false;                // is the flat list exact?
+
+    void alloc(const Geo& g, const Tbl& t) {
+        blk.assign((size_t)t.w * g.m, -1);
+        g0.assign((size_t)t.w * g.m, 0);
+        flat = !capIsSlider(g.pc[0]);
+        if (flat) {
+            const size_t cap = (size_t)t.w * 8;   // a king or a knight: at most 8
+            fdst.resize(cap); ffb.resize(cap); ffg.resize(cap);
+        }
+    }
+
+    void build(const Geo& g, const Tbl& t, const int* W) {
+        int dsq[MAXDST], dcap[MAXDST], tm[4];
+        nflat = 0;
+        for (int j = 0; j < t.w; ++j) {
+            int32_t* pb = &blk[(size_t)j * g.m];
+            std::fill(pb, pb + g.m, -1);
+            const int nd = genDst(g, g.pc[0], W[j], W, t.w, nullptr, 0, dsq, dcap);
+            for (int d = 0; d < nd; ++d) {
+                const int dst = dsq[d];
+                cpk(tm, W, t.w);
+                tm[j] = dst; sortk(tm, t.w);
+                int b2, g2; t.whiteFrame(tm, b2, g2);
+                pb[dst] = (int32_t)b2;
+                g0[(size_t)j * g.m + dst] = (uint8_t)g2;
+                if (flat) {
+                    fdst[(size_t)nflat] = dst;
+                    ffb[(size_t)nflat] = (int32_t)b2;
+                    ffg[(size_t)nflat] = (uint8_t)g2;
+                    ++nflat;
+                }
+            }
+        }
+    }
+};
+
 // Accumulate every move of `stm` from (W,B).  capW is the table entered when
 // White takes a black king, capB the one entered when Black takes a white king;
 // either is null when that capture ends the game instead.
 static inline void evalPos(const Geo& g, const Tbl& t, const Tbl* capW, const Tbl* capB,
                            const int* W, const int* B, int stm, Acc& acc,
-                           int blk, const int32_t* fblk, const uint8_t* fg0) {
+                           int blk, const Frames& fr) {
+    const int32_t* fblk = fr.blk.data();
+    const uint8_t* fg0  = fr.g0.data();
     const int* mv = stm == 0 ? W : B;
     const int* op = stm == 0 ? B : W;
     const int  km = stm == 0 ? t.w : t.b;
@@ -450,7 +518,26 @@ static inline void evalPos(const Geo& g, const Tbl& t, const Tbl* capW, const Tb
     const int myPc = g.pc[stm];
     int dsq[MAXDST], dcap[MAXDST];
     U64 brk[8];
-    if (stm == 0) t.rankAll(op, brk);
+    if (stm == 0) {
+        t.rankAll(op, brk);
+        if (fr.flat) {
+            // White's whole successor list is a property of the block: the
+            // destination square and the frame of the white set it produces.
+            // All that is left per successor is whether Black stands on the
+            // destination, which makes it a capture into the sub-table.
+            for (int k = 0; k < fr.nflat; ++k) {
+                const int dst = fr.fdst[(size_t)k];
+                const int fb = fr.ffb[(size_t)k], fg = fr.ffg[(size_t)k];
+                const int cap = capturedAt(op, ko, dst);
+                if (cap < 0) { acc.add(t.get(1, (U64)fb * t.nb + brk[fg])); continue; }
+                if (ko == 1) { acc.winNow(); continue; }   // his last man: over
+                int c = 0;
+                for (int q = 0; q < ko; ++q) if (q != cap) to[c++] = op[q];
+                acc.add(sub->get(1, sub->slotIn(fb, fg, to)));
+            }
+            return;
+        }
+    }
     for (int j = 0; j < km; ++j) {
         const int nd = genDst(g, myPc, mv[j], mv, km, op, ko, dsq, dcap);
         for (int d = 0; d < nd; ++d) {
@@ -494,37 +581,6 @@ static inline void evalPos(const Geo& g, const Tbl& t, const Tbl* capW, const Tb
                     acc.add(t.get(0, t.slotIn0(blk, tm)));
                 }
             }
-        }
-    }
-}
-
-// --------------------------------------------------------------------------
-// Per-block memo of the white half of the index.
-// --------------------------------------------------------------------------
-// The sweep holds one white set fixed while it runs through every black set in
-// the block -- C(m, b) of them, 196 at b = 1, n = 14.  White's successors are
-// the same perturbations of that one white set every time, so their frames are
-// the same too, and computing them once a block instead of once a black set
-// removes almost all of the random gathering into sym->blockOf.
-//
-// Built with no enemy man on the board, which yields a SUPERSET of the
-// destinations any real position in the block offers: a black man can only
-// block a ray or be captured on it, never open one.  So every (j, dst) the
-// sweep actually asks for is present.
-static void buildFrames(const Geo& g, const Tbl& t, const int* W,
-                        std::vector<int32_t>& fblk, std::vector<uint8_t>& fg0) {
-    int dsq[MAXDST], dcap[MAXDST], tm[4];
-    for (int j = 0; j < t.w; ++j) {
-        int32_t* pb = &fblk[(size_t)j * g.m];
-        std::fill(pb, pb + g.m, -1);
-        const int nd = genDst(g, g.pc[0], W[j], W, t.w, nullptr, 0, dsq, dcap);
-        for (int d = 0; d < nd; ++d) {
-            const int dst = dsq[d];
-            cpk(tm, W, t.w);
-            tm[j] = dst; sortk(tm, t.w);
-            int b2, g2; t.whiteFrame(tm, b2, g2);
-            pb[dst] = (int32_t)b2;
-            fg0[(size_t)j * g.m + dst] = (uint8_t)g2;
         }
     }
 }
@@ -612,7 +668,7 @@ static inline void emitOrbitRanked(const Geo& g, const Tbl& t, const Sym& sy,
 
 template <class F>
 static void forEachPredSlot(const Geo& g, const Tbl& t, const Sym& sy,
-                            const int* W, const int* B, int stm, F fn) {
+                            const int* W, const int* B, int stm, const Frames* fr, F fn) {
     int dsq[MAXDST], dcap[MAXDST], tm[4];
     if (stm == 0) {                          // Black moved last; rewind a black man
         const U64 wr = rk(W, t.w);           // white set fixed: lift its frame
@@ -629,6 +685,26 @@ static void forEachPredSlot(const Geo& g, const Tbl& t, const Sym& sy,
     } else {                                 // White moved last; rewind a white man
         U64 brk[8];                          // black set fixed: rank its images
         t.rankAll(B, brk);
+        if (fr && fr->flat) {
+            // A king's and a knight's move relation is its own reverse, so the
+            // squares a white man could have come from are the same flat list
+            // evalPos walks forward -- and the list carries the frame of the
+            // rewound set, so the rank and the two gathers off it are gone
+            // too.  A destination Black occupies would be an un-capture, which
+            // belongs to another table.
+            for (int k = 0; k < fr->nflat; ++k) {
+                const int dst = fr->fdst[(size_t)k];
+                if (occupies(B, t.b, dst)) continue;
+                const int fb = fr->ffb[(size_t)k], fg = fr->ffg[(size_t)k];
+                fn((U64)fb * t.nb + brk[fg], 0);
+                if (sy.wt[fb] == 8) continue;
+                int im[4];
+                for (int q = 0; q < t.b; ++q) im[q] = g.img(fg, B[q]);
+                sortk(im, t.b);
+                emitOrbitSlack(g, t, sy, fb, im, 0, fn);
+            }
+            return;
+        }
         for (int j = 0; j < t.w; ++j) {
             const int nd = genDst(g, g.pc[0], W[j], W, t.w, B, t.b, dsq, dcap);
             for (int d = 0; d < nd; ++d) {
@@ -687,19 +763,18 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
     {
         auto initer = [&](int q, U64 lo, U64 hi) {
             int B[4];
-            std::vector<int32_t> fblk((size_t)t.w * g.m, -1);
-            std::vector<uint8_t> fg0((size_t)t.w * g.m, 0);
+            Frames fr; fr.alloc(g, t);
             std::vector<Ev>& ev = tev[q];
             for (U64 blk = lo; blk < hi; ++blk) {
                 const int* W = (const int*)&sy.blkSq[(size_t)blk * t.w];
-                buildFrames(g, t, W, fblk, fg0);
+                fr.build(g, t, W);
                 for (U64 br = 0; br < t.nb; ++br) {
                     const U64 i = blk * t.nb + br;
                     if (t.get(0, i) == ILL) continue;
                     for (int z = 0; z < t.b; ++z) B[z] = bset[(size_t)br * t.b + z];
                     for (int stm = 0; stm < 2; ++stm) {
                         Acc a;
-                        evalPos(g, t, capW, capB, W, B, stm, a, (int)blk, fblk.data(), fg0.data());
+                        evalPos(g, t, capW, capB, W, B, stm, a, (int)blk, fr);
                         if (a.notWin > FR_FANOUT) { tooWide = true; return; }
                         outs[stm][i] = (uint8_t)a.notWin;
                         // Exactly the sweep's precedence.  `best` first: a
@@ -914,8 +989,7 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
 
         auto run = [&](int q, size_t lo, size_t hi) {
             int B0[4];
-            std::vector<int32_t> fblk((size_t)t.w * g.m, -1);
-            std::vector<uint8_t> fg0((size_t)t.w * g.m, 0);
+            Frames fr; fr.alloc(g, t);
             std::vector<Wake>& out = wk[q];
             U64 lastBlk = (U64)-1, loc = 0, newb = 0;
             // Set a bit in the next depth's map; true if this call is what put
@@ -934,9 +1008,9 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
                 const U64 blk = i / t.nb, br = i % t.nb;
                 const int* W = (const int*)&sy.blkSq[(size_t)blk * t.w];
                 for (int z2 = 0; z2 < t.b; ++z2) B0[z2] = bset[(size_t)br * t.b + z2];
-                if (blk != lastBlk) { buildFrames(g, t, W, fblk, fg0); lastBlk = blk; }
+                if (blk != lastBlk) { fr.build(g, t, W); lastBlk = blk; }
                 Acc a;
-                evalPos(g, t, capW, capB, W, B0, stm, a, (int)blk, fblk.data(), fg0.data());
+                evalPos(g, t, capW, capB, W, B0, stm, a, (int)blk, fr);
                 ++loc;
                 // Write ONLY at the bucket equal to the value's own magnitude,
                 // which keeps every write in increasing-depth order and is what
@@ -958,7 +1032,7 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
                 t.put(stm, i, nv);
                 if (nv == 0) continue;
                 const int mag = nv < 0 ? -nv : nv;
-                forEachPredSlot(g, t, sy, W, B0, stm, [&](U64 pi, int ps) {
+                forEachPredSlot(g, t, sy, W, B0, stm, &fr, [&](U64 pi, int ps) {
                     if (t.get(ps, pi) != UNK) return;
                     const U64 pk = (pi << 1) | (U64)ps;
                     // mag == d here, so a predecessor woken by this value is a
@@ -1075,12 +1149,11 @@ static void solve(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW, const Tb
             int B[4];
             U64 loc = 0; int locPend = 0;
             U64 locEval = 0, locSucc = 0;
-            std::vector<int32_t> fblk((size_t)t.w * g.m, -1);
-            std::vector<uint8_t> fg0((size_t)t.w * g.m, 0);
+            Frames fr; fr.alloc(g, t);
             for (U64 blk = lo; blk < hi; ++blk) {
                 if (!live[blk]) continue;
                 const int* W = (const int*)&sy.blkSq[(size_t)blk * t.w];
-                buildFrames(g, t, W, fblk, fg0);
+                fr.build(g, t, W);
                 bool anyLeft = false;
                 for (int q = 0; q < t.b; ++q) B[q] = q;
                 for (U64 br = 0; br < t.nb; ++br) {
@@ -1088,7 +1161,7 @@ static void solve(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW, const Tb
                     for (int stm = 0; stm < 2; ++stm) {
                         if (t.get(stm, i) != UNK) continue;
                         Acc a;
-                        evalPos(g, t, capW, capB, W, B, stm, a, (int)blk, fblk.data(), fg0.data());
+                        evalPos(g, t, capW, capB, W, B, stm, a, (int)blk, fr);
                         ++locEval; locSucc += (U64)a.moves;
                         S16 nv;
                         if (a.best && a.best <= k)          nv = (S16)a.best;
@@ -1183,8 +1256,7 @@ static void fixpoint(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
         std::atomic<int> pend{0};
         auto worker = [&](size_t lo, size_t hi) {
             int B[4];
-            std::vector<int32_t> fblk((size_t)t.w * g.m, -1);
-            std::vector<uint8_t> fg0((size_t)t.w * g.m, 0);
+            Frames fr; fr.alloc(g, t);
             U64 last = (U64)-1, loc = 0; int locPend = 0;
             for (size_t z = lo; z < hi; ++z) {
                 const U64 key = todo[z], i = key >> 1;
@@ -1192,10 +1264,10 @@ static void fixpoint(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
                 if (t.get(stm, i) != UNK) continue;
                 const U64 blk = i / t.nb, br = i % t.nb;
                 const int* W = (const int*)&sy.blkSq[(size_t)blk * t.w];
-                if (blk != last) { buildFrames(g, t, W, fblk, fg0); last = blk; }
+                if (blk != last) { fr.build(g, t, W); last = blk; }
                 for (int q = 0; q < t.b; ++q) B[q] = bs[(size_t)br * t.b + q];
                 Acc a;
-                evalPos(g, t, capW, capB, W, B, stm, a, (int)blk, fblk.data(), fg0.data());
+                evalPos(g, t, capW, capB, W, B, stm, a, (int)blk, fr);
                 S16 nv;
                 if (a.best && a.best <= k)      nv = (S16)a.best;
                 else if (a.best)                { if (a.best > locPend) locPend = a.best; continue; }
