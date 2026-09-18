@@ -386,6 +386,25 @@ struct Tbl {
         sortk(t, b);
         return (U64)blk * nb + rk(t, b);
     }
+    // The identity group element, for a set the caller already has sorted:
+    // neither the image nor the sort has anything to do.  This is the whole
+    // of Black's non-capture successor, since a black move leaves the white
+    // set at its block's canonical representative.
+    inline U64 slotIn0(int blk, const int* B) const {
+        return (U64)blk * nb + rk(B, b);
+    }
+    // Rank the black set under each of the eight group elements.  White's
+    // successors all carry the SAME black set, and differ only in which
+    // element carries it, so this replaces one image-sort-rank per successor
+    // with one array read.
+    inline void rankAll(const int* B, U64* out) const {
+        int t[4];
+        for (int e = 0; e < 8; ++e) {
+            for (int q = 0; q < b; ++q) t[q] = geo->img(e, B[q]);
+            sortk(t, b);
+            out[e] = rk(t, b);
+        }
+    }
     inline U64 slot(const int* W, const int* B) const {
         int blk, g0;
         whiteFrame(W, blk, g0);
@@ -430,14 +449,13 @@ static inline void evalPos(const Geo& g, const Tbl& t, const Tbl* capW, const Tb
 
     const int myPc = g.pc[stm];
     int dsq[MAXDST], dcap[MAXDST];
+    U64 brk[8];
+    if (stm == 0) t.rankAll(op, brk);
     for (int j = 0; j < km; ++j) {
         const int nd = genDst(g, myPc, mv[j], mv, km, op, ko, dsq, dcap);
         for (int d = 0; d < nd; ++d) {
             const int dst = dsq[d];
             const int cap = dcap[d];
-
-            cpk(tm, mv, km);
-            tm[j] = dst; sortk(tm, km);
 
             if (stm == 0) {
                 // White moved, so the white set changed -- but it changed into
@@ -453,9 +471,15 @@ static inline void evalPos(const Geo& g, const Tbl& t, const Tbl* capW, const Tb
                     for (int q = 0; q < ko; ++q) if (q != cap) to[c++] = op[q];
                     acc.add(sub->get(1, sub->slotIn(fb, fg, to)));
                 } else {
-                    acc.add(t.get(1, t.slotIn(fb, fg, op)));
+                    acc.add(t.get(1, (U64)fb * t.nb + brk[fg]));
                 }
             } else {
+                // Only this branch reads the moved set: White's successor is
+                // named by its precomputed frame instead, so building and
+                // sorting `tm` for White was dead work -- once per successor,
+                // on half of all evaluations.
+                cpk(tm, mv, km);
+                tm[j] = dst; sortk(tm, km);
                 if (cap >= 0) {
                     if (ko == 1) { acc.winNow(); continue; }
                     int c = 0;
@@ -467,7 +491,7 @@ static inline void evalPos(const Geo& g, const Tbl& t, const Tbl* capW, const Tb
                     // Black moved, so the white set is this block's canonical
                     // representative: its frame is (blk, identity) by
                     // construction.  No gather at all.
-                    acc.add(t.get(0, t.slotIn(blk, 0, tm)));
+                    acc.add(t.get(0, t.slotIn0(blk, tm)));
                 }
             }
         }
@@ -533,16 +557,13 @@ static const int FR_FANOUT = 255;    // outs is a byte
 // them or the frontier writes values out of order and records wins longer than
 // the shortest.  wt[blk] == 8 means the stabiliser is trivial -- one byte to
 // check, and it is the overwhelmingly common case.
+// The slack case only: walk the stabiliser of this block's representative and
+// emit the black set under each element that fixes it.  Split out because it
+// is rare -- wt[blk] == 8 means the stabiliser is trivial -- and keeping it
+// out of line leaves the common path to the two entry points below.
 template <class F>
-static inline void emitOrbitSlots(const Geo& g, const Tbl& t, const Sym& sy,
-                                  const int* Wp, const int* Bp, int ps, F fn) {
-    const U64 wr = rk(Wp, t.w);
-    const int blk = sy.blockOf[wr], g0 = sy.gTo[wr];
-    int im[4];
-    for (int q = 0; q < t.b; ++q) im[q] = g.img(g0, Bp[q]);
-    sortk(im, t.b);
-    fn((U64)blk * t.nb + rk(im, t.b), ps);
-    if (sy.wt[blk] == 8) return;
+static void emitOrbitSlack(const Geo& g, const Tbl& t, const Sym& sy,
+                           int blk, const int* im, int ps, F fn) {
     const int* Wc = (const int*)&sy.blkSq[(size_t)blk * t.w];
     int tw[4], tb[4];
     for (int e = 1; e < 8; ++e) {
@@ -557,28 +578,64 @@ static inline void emitOrbitSlots(const Geo& g, const Tbl& t, const Sym& sy,
     }
 }
 
+// Rewinding a BLACK man leaves the white set alone, so its rank and the two
+// random gathers off it -- into blockOf and gTo, tens of megabytes at w = 4 --
+// are the same for every predecessor.  The caller lifts them and passes the
+// frame in.
+template <class F>
+static inline void emitOrbitAt(const Geo& g, const Tbl& t, const Sym& sy,
+                               int blk, int g0, const int* Bp, int ps, F fn) {
+    int im[4];
+    for (int q = 0; q < t.b; ++q) im[q] = g.img(g0, Bp[q]);
+    sortk(im, t.b);
+    fn((U64)blk * t.nb + rk(im, t.b), ps);
+    if (sy.wt[blk] == 8) return;
+    emitOrbitSlack(g, t, sy, blk, im, ps, fn);
+}
+
+// Rewinding a WHITE man leaves the black set alone, so its eight images are
+// the same for every predecessor and the caller ranks them once.  Only the
+// slack case still needs the squares themselves.
+template <class F>
+static inline void emitOrbitRanked(const Geo& g, const Tbl& t, const Sym& sy,
+                                   const int* Wp, const int* Bp, const U64* brk,
+                                   int ps, F fn) {
+    const U64 wr = rk(Wp, t.w);
+    const int blk = sy.blockOf[wr], g0 = sy.gTo[wr];
+    fn((U64)blk * t.nb + brk[g0], ps);
+    if (sy.wt[blk] == 8) return;
+    int im[4];
+    for (int q = 0; q < t.b; ++q) im[q] = g.img(g0, Bp[q]);
+    sortk(im, t.b);
+    emitOrbitSlack(g, t, sy, blk, im, ps, fn);
+}
+
 template <class F>
 static void forEachPredSlot(const Geo& g, const Tbl& t, const Sym& sy,
                             const int* W, const int* B, int stm, F fn) {
     int dsq[MAXDST], dcap[MAXDST], tm[4];
     if (stm == 0) {                          // Black moved last; rewind a black man
+        const U64 wr = rk(W, t.w);           // white set fixed: lift its frame
+        const int wblk = sy.blockOf[wr], wg0 = sy.gTo[wr];
         for (int j = 0; j < t.b; ++j) {
             const int nd = genDst(g, g.pc[1], B[j], B, t.b, W, t.w, dsq, dcap);
             for (int d = 0; d < nd; ++d) {
                 if (dcap[d] >= 0) continue;  // would be an un-capture: another table
                 cpk(tm, B, t.b);
                 tm[j] = dsq[d]; sortk(tm, t.b);
-                emitOrbitSlots(g, t, sy, W, tm, 1, fn);
+                emitOrbitAt(g, t, sy, wblk, wg0, tm, 1, fn);
             }
         }
     } else {                                 // White moved last; rewind a white man
+        U64 brk[8];                          // black set fixed: rank its images
+        t.rankAll(B, brk);
         for (int j = 0; j < t.w; ++j) {
             const int nd = genDst(g, g.pc[0], W[j], W, t.w, B, t.b, dsq, dcap);
             for (int d = 0; d < nd; ++d) {
                 if (dcap[d] >= 0) continue;
                 cpk(tm, W, t.w);
                 tm[j] = dsq[d]; sortk(tm, t.w);
-                emitOrbitSlots(g, t, sy, tm, B, 0, fn);
+                emitOrbitRanked(g, t, sy, tm, B, brk, 0, fn);
             }
         }
     }
