@@ -636,66 +636,113 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
     auto sched = [&](U64 key, int d) { bucket[d].push_back(key); };
     for (auto& ev : tev) { for (const Ev& e : ev) sched(e.key, e.d); ev.clear(); ev.shrink_to_fit(); }
 
-    int B0[4];
-    std::vector<int32_t> fblk((size_t)t.w * g.m, -1);
-    std::vector<uint8_t> fg0((size_t)t.w * g.m, 0);
-    U64 evals = 0, lastBlk = (U64)-1;
+    // ---- propagate, buckets in increasing depth ------------------------
+    // Events inside one bucket are independent: they all carry depth d, and a
+    // win at d only reads losses at d-1, which were written in an earlier
+    // bucket and are separated from this one by the join.  So a bucket can be
+    // split across threads.  What is shared:
+    //   * the value array, through the same relaxed atomics the sweep uses;
+    //   * `outs`, decremented with a compare-exchange so it can never run
+    //     below zero;
+    //   * the wake-up queue, which each thread writes locally and which is
+    //     merged into the bucket map after the join.
+    // A thread can overwrite another's decrement when it self-heals `outs`
+    // from its own evaluation.  That can only leave the counter too HIGH, so
+    // the position is never wrongly declared lost -- it is left unresolved
+    // instead, and the closing fixpoint collects it.
+    struct Wake { int d; uint64_t key; };
+    std::vector<std::vector<Wake>> wk(nthr);
+    std::atomic<U64> evalsA{0};
+    auto decOuts = [&](int ps, U64 pi) -> bool {          // true iff it just hit zero
+        std::atomic_ref<uint8_t> r(outs[ps][pi]);
+        uint8_t v = r.load(std::memory_order_relaxed);
+        while (v) {
+            if (r.compare_exchange_weak(v, (uint8_t)(v - 1), std::memory_order_relaxed))
+                return v == 1;
+        }
+        return false;
+    };
+
     while (!bucket.empty()) {
         auto it = bucket.begin();
         const int d = it->first;
         std::vector<uint64_t> work = std::move(it->second);
         bucket.erase(it);
-        // Sorting the bucket groups its events by slot, hence by block, so the
-        // frame memo is built once a block rather than once an event -- and it
-        // puts duplicates next to each other, which can then be dropped.
-        // Collapsing duplicates WITHIN one bucket is safe: they carry the same
-        // depth, so none of them is the shorter wake-up the de-dupe bug lost.
+        // Sorting groups the bucket by slot, hence by block, so the frame memo
+        // is built once a block rather than once an event -- and it puts
+        // duplicates together so they can be dropped.  Collapsing duplicates
+        // WITHIN one bucket is safe: they all carry the same depth, so none of
+        // them is the shorter wake-up that de-duplicating across buckets lost.
         std::sort(work.begin(), work.end());
         work.erase(std::unique(work.begin(), work.end()), work.end());
-        lastBlk = (U64)-1;
-        for (U64 key : work) {
-            const U64 i = key >> 1; const int stm = (int)(key & 1);
-            if (t.get(stm, i) != UNK) continue;
-            const U64 blk = i / t.nb, br = i % t.nb;
-            const int* W = (const int*)&sy.blkSq[(size_t)blk * t.w];
-            for (int z = 0; z < t.b; ++z) B0[z] = bset[(size_t)br * t.b + z];
-            if (blk != lastBlk) { buildFrames(g, t, W, fblk, fg0); lastBlk = blk; }
-            Acc a;
-            evalPos(g, t, capW, capB, W, B0, stm, a, (int)blk, fblk.data(), fg0.data());
-            ++evals;
-            // Write ONLY at the bucket equal to the value's own magnitude.
-            // That keeps every write in increasing-depth order, which is what
-            // makes `a.best` the true shortest win when it is taken.  A value
-            // whose magnitude is not d is rescheduled at its own bucket -- the
-            // map is ordered, so a smaller one is picked up next.
-            S16 nv;
-            if (a.best) {
-                if (a.best != d) { sched(key, a.best); continue; }
-                nv = (S16)a.best;
-            } else if (a.anyUnknown) {
-                // A premature wake-up.  Re-derive the counter from the
-                // evaluation we just did, so an over-decrement cannot make the
-                // position permanently undetectable.
-                outs[stm][i] = (uint8_t)a.notWin;
-                continue;
-            } else if (!a.moves || a.anyDraw) {
-                nv = 0;
-            } else {
-                if (a.worst != d) { sched(key, a.worst); continue; }
-                nv = (S16)-a.worst;
+        for (auto& v : wk) v.clear();
+
+        auto run = [&](int q, size_t lo, size_t hi) {
+            int B0[4];
+            std::vector<int32_t> fblk((size_t)t.w * g.m, -1);
+            std::vector<uint8_t> fg0((size_t)t.w * g.m, 0);
+            std::vector<Wake>& out = wk[q];
+            U64 lastBlk = (U64)-1, loc = 0;
+            for (size_t z = lo; z < hi; ++z) {
+                const U64 key = work[z], i = key >> 1;
+                const int stm = (int)(key & 1);
+                if (t.get(stm, i) != UNK) continue;
+                const U64 blk = i / t.nb, br = i % t.nb;
+                const int* W = (const int*)&sy.blkSq[(size_t)blk * t.w];
+                for (int z2 = 0; z2 < t.b; ++z2) B0[z2] = bset[(size_t)br * t.b + z2];
+                if (blk != lastBlk) { buildFrames(g, t, W, fblk, fg0); lastBlk = blk; }
+                Acc a;
+                evalPos(g, t, capW, capB, W, B0, stm, a, (int)blk, fblk.data(), fg0.data());
+                ++loc;
+                // Write ONLY at the bucket equal to the value's own magnitude,
+                // which keeps every write in increasing-depth order and is what
+                // makes `a.best` the true shortest win when it is taken.
+                S16 nv;
+                if (a.best) {
+                    if (a.best != d) { out.push_back({ a.best, key }); continue; }
+                    nv = (S16)a.best;
+                } else if (a.anyUnknown) {
+                    std::atomic_ref<uint8_t>(outs[stm][i])
+                        .store((uint8_t)a.notWin, std::memory_order_relaxed);
+                    continue;
+                } else if (!a.moves || a.anyDraw) {
+                    nv = 0;
+                } else {
+                    if (a.worst != d) { out.push_back({ a.worst, key }); continue; }
+                    nv = (S16)-a.worst;
+                }
+                t.put(stm, i, nv);
+                if (nv == 0) continue;
+                const int mag = nv < 0 ? -nv : nv;
+                forEachPredSlot(g, t, sy, W, B0, stm, [&](U64 pi, int ps) {
+                    if (t.get(ps, pi) != UNK) return;
+                    if (nv < 0) { out.push_back({ mag + 1, (uint64_t)((pi << 1) | (U64)ps) }); return; }
+                    if (decOuts(ps, pi)) out.push_back({ mag + 1, (uint64_t)((pi << 1) | (U64)ps) });
+                });
             }
-            t.put(stm, i, nv);
-            if (nv == 0) continue;
-            const int mag = nv < 0 ? -nv : nv;
-            forEachPredSlot(g, t, sy, W, B0, stm, [&](U64 pi, int ps) {
-                if (t.get(ps, pi) != UNK) return;
-                if (nv < 0) { sched((pi << 1) | (U64)ps, mag + 1); return; }   // a loss: predecessors win
-                uint8_t& oo = outs[ps][pi];
-                if (!oo) return;
-                if (--oo == 0) sched((pi << 1) | (U64)ps, mag + 1);            // all its moves lose
-            });
+            evalsA += loc;
+        };
+
+        // Small buckets are not worth eight thread launches.  EGTB_PAR_MIN
+        // lowers the threshold so a sanitiser run can be forced down the
+        // parallel path on a board small enough to run under one.
+        static const size_t parMin =
+            getenv("EGTB_PAR_MIN") ? (size_t)std::atol(getenv("EGTB_PAR_MIN")) : 8192;
+        if (work.size() < parMin || nthr < 2) {
+            run(0, 0, work.size());
+        } else {
+            std::vector<std::thread> th;
+            const size_t chunk = (work.size() + nthr - 1) / nthr;
+            for (int q = 0; q < nthr; ++q) {
+                size_t lo = std::min(q * chunk, work.size()), hi = std::min(lo + chunk, work.size());
+                if (lo < hi) th.emplace_back(run, q, lo, hi);
+            }
+            for (auto& x : th) x.join();
         }
+        for (auto& v : wk) for (const Wake& e : v) bucket[e.d].push_back(e.key);
     }
+    const U64 evals = evalsA.load();
+
     if (progress) std::printf("      frontier: %llu evaluations (%.2f per entry)\n",
                               (unsigned long long)evals, (double)evals / (double)(2 * t.N));
     return true;
