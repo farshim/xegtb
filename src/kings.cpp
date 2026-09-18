@@ -160,6 +160,35 @@ struct Geo {
 // n <= MAXDST/capMaxRays(piece) + 1.
 static const int MAXDST = 256;
 
+// Every man-set in here is an int[4] holding k = 1..4 squares.  Saying so out
+// loud matters: with k a runtime variable clang lowers `for (q<k) d[q]=s[q]`
+// into a call to memcpy, and the profile showed _platform_memmove taking ~6%
+// of the solve to move four words at a time.  With the range pinned it
+// unrolls into stores.
+#define KSET_BOUND(k) do { if ((k) < 1 || (k) > 4) __builtin_unreachable(); } while (0)
+
+// Occupancy tests over a man-set of one to four squares.  Written without the
+// early exit on purpose: the scan is short and the position of the hit is
+// effectively random, so `break` bought a skipped comparison at the price of a
+// branch mispredict.  Fixing the trip count instead lets these fold into a
+// handful of compares and conditional selects.  capturedAt returns the index
+// of the man standing on t, or -1; the squares in a set are distinct, so
+// taking the last match is the same as taking the first.
+static inline bool occupies(const int* set, int k, int t) {
+    if (k == 0) return false;
+    KSET_BOUND(k);
+    int hit = 0;
+    for (int q = 0; q < k; ++q) hit |= (set[q] == t);
+    return hit != 0;
+}
+static inline int capturedAt(const int* set, int k, int t) {
+    if (k == 0) return -1;
+    KSET_BOUND(k);
+    int at = -1;
+    for (int q = 0; q < k; ++q) at = (set[q] == t) ? q : at;
+    return at;
+}
+
 static inline int genDst(const Geo& g, int pc, int s, const int* mine, int km,
                          const int* opp, int ko, int* dst, int* capOf) {
     int c = 0;
@@ -169,11 +198,8 @@ static inline int genDst(const Geo& g, int pc, int s, const int* mine, int km,
         const int nd = kn ? g.kcnt[s] : g.ncnt[s];
         for (int d = 0; d < nd; ++d) {
             const int t = nb[d];
-            bool own = false;
-            for (int q = 0; q < km; ++q) if (mine[q] == t) { own = true; break; }
-            if (own) continue;
-            int cap = -1;
-            for (int q = 0; q < ko; ++q) if (opp[q] == t) { cap = q; break; }
+            if (occupies(mine, km, t)) continue;
+            const int cap = capturedAt(opp, ko, t);
             dst[c] = t; capOf[c] = cap; ++c;
         }
         return c;
@@ -185,11 +211,8 @@ static inline int genDst(const Geo& g, int pc, int s, const int* mine, int km,
         int f = f0 + DF[d], r = r0 + DR[d];
         for (; f >= 0 && f < n && r >= 0 && r < n; f += DF[d], r += DR[d]) {
             const int t = r * n + f;
-            bool own = false;
-            for (int q = 0; q < km; ++q) if (mine[q] == t) { own = true; break; }
-            if (own) break;                     // our own man: the ray stops short of it
-            int cap = -1;
-            for (int q = 0; q < ko; ++q) if (opp[q] == t) { cap = q; break; }
+            if (occupies(mine, km, t)) break;   // our own man: the ray stops short of it
+            const int cap = capturedAt(opp, ko, t);
             dst[c] = t; capOf[c] = cap; ++c;
             if (cap >= 0) break;                // his man: take it, and the ray stops on it
         }
@@ -221,8 +244,25 @@ static inline bool nextCombo(int* a, int k, int m) {   // colex successor
     }
     return false;
 }
+static inline void cpk(int* d, const int* s, int k) {
+    KSET_BOUND(k);
+    for (int q = 0; q < k; ++q) d[q] = s[q];
+}
+
+// Sorting networks, not an insertion sort.  These sets are sorted once per
+// successor -- tens of millions of times a second -- and an insertion sort's
+// inner loop runs a data-dependent number of times on effectively random
+// input, so it mispredicted on nearly every call.  The comparators below
+// lower to conditional selects, so the only branch left is the dispatch on k,
+// which is constant for the whole solve and so predicts perfectly.
+#define KSW(i, j) do { const int x = a[i], y = a[j];                  \
+                       a[i] = x < y ? x : y; a[j] = x < y ? y : x; } while (0)
 static inline void sortk(int* a, int k) {
-    for (int i = 1; i < k; ++i) { int x = a[i], j = i - 1; while (j >= 0 && a[j] > x) { a[j + 1] = a[j]; --j; } a[j + 1] = x; }
+    KSET_BOUND(k);
+    if (k == 1) return;
+    if (k == 2) { KSW(0, 1); return; }
+    if (k == 3) { KSW(0, 1); KSW(1, 2); KSW(0, 1); return; }
+    KSW(0, 1); KSW(2, 3); KSW(0, 2); KSW(1, 3); KSW(1, 2);
 }
 
 
@@ -393,7 +433,7 @@ static inline void evalPos(const Geo& g, const Tbl& t, const Tbl* capW, const Tb
             const int dst = dsq[d];
             const int cap = dcap[d];
 
-            for (int q = 0; q < km; ++q) tm[q] = mv[q];
+            cpk(tm, mv, km);
             tm[j] = dst; sortk(tm, km);
 
             if (stm == 0) {
@@ -453,7 +493,7 @@ static void buildFrames(const Geo& g, const Tbl& t, const int* W,
         const int nd = genDst(g, g.pc[0], W[j], W, t.w, nullptr, 0, dsq, dcap);
         for (int d = 0; d < nd; ++d) {
             const int dst = dsq[d];
-            for (int q = 0; q < t.w; ++q) tm[q] = W[q];
+            cpk(tm, W, t.w);
             tm[j] = dst; sortk(tm, t.w);
             int b2, g2; t.whiteFrame(tm, b2, g2);
             pb[dst] = (int32_t)b2;
@@ -523,7 +563,7 @@ static void forEachPredSlot(const Geo& g, const Tbl& t, const Sym& sy,
             const int nd = genDst(g, g.pc[1], B[j], B, t.b, W, t.w, dsq, dcap);
             for (int d = 0; d < nd; ++d) {
                 if (dcap[d] >= 0) continue;  // would be an un-capture: another table
-                for (int q = 0; q < t.b; ++q) tm[q] = B[q];
+                cpk(tm, B, t.b);
                 tm[j] = dsq[d]; sortk(tm, t.b);
                 emitOrbitSlots(g, t, sy, W, tm, 1, fn);
             }
@@ -533,7 +573,7 @@ static void forEachPredSlot(const Geo& g, const Tbl& t, const Sym& sy,
             const int nd = genDst(g, g.pc[0], W[j], W, t.w, B, t.b, dsq, dcap);
             for (int d = 0; d < nd; ++d) {
                 if (dcap[d] >= 0) continue;
-                for (int q = 0; q < t.w; ++q) tm[q] = W[q];
+                cpk(tm, W, t.w);
                 tm[j] = dsq[d]; sortk(tm, t.w);
                 emitOrbitSlots(g, t, sy, tm, B, 0, fn);
             }
