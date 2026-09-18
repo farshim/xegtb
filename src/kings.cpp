@@ -94,6 +94,38 @@ static inline void st8(S8* p, U64 i, S8 v) {
     std::atomic_ref<S8>(p[i]).store(v, std::memory_order_relaxed);
 }
 
+// --------------------------------------------------------------------------
+// Parallel for, with the work handed out dynamically.
+// --------------------------------------------------------------------------
+// Equal shares are wrong on an asymmetric machine.  This one has four
+// performance and four efficiency cores, and every parallel phase here ends
+// at a barrier, so equal shares leave the fast cores idling while the slow
+// ones finish their identical portion.  Measured on KKKK v K n = 12: 3.02x on
+// four threads, only 3.43x on eight, and six threads slower in wall time than
+// four -- while total CPU time nearly doubled, 154s to 298s, which is the
+// efficiency cores burning time on work a performance core would have taken.
+//
+// So: a shared counter, and each thread claims a chunk at a time and comes
+// back for more.  `work(q, claim)` runs once per thread; it sets up whatever
+// per-thread state it needs, then calls claim(lo, hi) until that returns
+// false.  The grain has to be big enough to bury the atomic and small enough
+// that the tail is short.
+template <class F>
+static void parDyn(int nthr, U64 n, U64 grain, F work) {
+    std::atomic<U64> next{0};
+    auto claim = [&](U64& lo, U64& hi) {
+        lo = next.fetch_add(grain, std::memory_order_relaxed);
+        if (lo >= n) return false;
+        hi = std::min(lo + grain, n);
+        return true;
+    };
+    if (nthr < 2) { work(0, claim); return; }
+    std::vector<std::thread> th;
+    th.reserve((size_t)nthr);
+    for (int q = 0; q < nthr; ++q) th.emplace_back([&, q] { work(q, claim); });
+    for (auto& x : th) x.join();
+}
+
 static std::atomic<U64> gEvals{0}, gSucc{0}, gSweeps{0};
 // Frontier queue accounting, printed under EGTB_QUEUE.
 static std::atomic<U64> gWake{0}, gAfterUniq{0}, gBuckets{0}, gBackwards{0};
@@ -767,41 +799,40 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
     std::vector<std::vector<Ev>> tev(nthr);
     std::atomic<bool> tooWide{false};
     {
-        auto initer = [&](int q, U64 lo, U64 hi) {
+        auto initer = [&](int q, auto& claim) {
             int B[4];
             Frames fr; fr.alloc(g, t);
+            U64 lo, hi;
             std::vector<Ev>& ev = tev[q];
-            for (U64 blk = lo; blk < hi; ++blk) {
-                const int* W = (const int*)&sy.blkSq[(size_t)blk * t.w];
-                fr.build(g, t, W);
-                for (U64 br = 0; br < t.nb; ++br) {
-                    const U64 i = blk * t.nb + br;
-                    if (t.get(0, i) == ILL) continue;
-                    for (int z = 0; z < t.b; ++z) B[z] = bset[(size_t)br * t.b + z];
-                    for (int stm = 0; stm < 2; ++stm) {
-                        Acc a;
-                        evalPos(g, t, capW, capB, W, B, stm, a, (int)blk, fr);
-                        if (a.notWin > FR_FANOUT) { tooWide = true; return; }
-                        outs[stm][i] = (uint8_t)a.notWin;
-                        // Exactly the sweep's precedence.  `best` first: a
-                        // drawn conversion in hand does NOT settle a position
-                        // that also has a win, and an unresolved successor
-                        // does not settle one at all.
-                        if (a.best)                      ev.push_back({ (i << 1) | (U64)stm, a.best });
-                        else if (a.anyUnknown)           { }            // wait for a wake-up
-                        else if (!a.moves || a.anyDraw)  t.put(stm, i, 0);
-                        else                             ev.push_back({ (i << 1) | (U64)stm, a.worst });
+            while (claim(lo, hi)) {
+                for (U64 blk = lo; blk < hi; ++blk) {
+                    const int* W = (const int*)&sy.blkSq[(size_t)blk * t.w];
+                    fr.build(g, t, W);
+                    for (U64 br = 0; br < t.nb; ++br) {
+                        const U64 i = blk * t.nb + br;
+                        if (t.get(0, i) == ILL) continue;
+                        for (int z = 0; z < t.b; ++z) B[z] = bset[(size_t)br * t.b + z];
+                        for (int stm = 0; stm < 2; ++stm) {
+                            Acc a;
+                            evalPos(g, t, capW, capB, W, B, stm, a, (int)blk, fr);
+                            if (a.notWin > FR_FANOUT) { tooWide = true; return; }
+                            outs[stm][i] = (uint8_t)a.notWin;
+                            // Exactly the sweep's precedence.  `best` first: a
+                            // drawn conversion in hand does NOT settle a position
+                            // that also has a win, and an unresolved successor
+                            // does not settle one at all.
+                            if (a.best)                      ev.push_back({ (i << 1) | (U64)stm, a.best });
+                            else if (a.anyUnknown)           { }            // wait for a wake-up
+                            else if (!a.moves || a.anyDraw)  t.put(stm, i, 0);
+                            else                             ev.push_back({ (i << 1) | (U64)stm, a.worst });
+                        }
                     }
                 }
             }
         };
-        std::vector<std::thread> th;
-        U64 chunk = (t.nblk + nthr - 1) / nthr;
-        for (int q = 0; q < nthr; ++q) {
-            U64 lo = std::min<U64>((U64)q * chunk, t.nblk), hi = std::min<U64>(lo + chunk, t.nblk);
-            if (lo < hi) th.emplace_back(initer, q, lo, hi);
-        }
-        for (auto& x : th) x.join();
+        // A block is C(m, b) positions, so a few dozen of them is already a
+        // substantial chunk.
+        parDyn(nthr, t.nblk, 32, initer);
     }
     if (tooWide.load()) return false;
 
@@ -993,7 +1024,7 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
         std::fill(nsetT.begin(), nsetT.end(), 0);
         const int nxt = 1 - cur;
 
-        auto run = [&](int q, size_t lo, size_t hi) {
+        auto run = [&](int q, auto& claim) {
             int B0[4];
             Frames fr; fr.alloc(g, t);
             std::vector<Wake>& out = wk[q];
@@ -1007,47 +1038,50 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
                 const U64 mk = (U64)1 << (k & 63);
                 return !(r.fetch_or(mk, std::memory_order_relaxed) & mk);
             };
-            for (size_t z = lo; z < hi; ++z) {
-                const U64 key = work[z], i = key >> 1;
-                const int stm = (int)(key & 1);
-                if (t.get(stm, i) != UNK) continue;
-                const U64 blk = i / t.nb, br = i % t.nb;
-                const int* W = (const int*)&sy.blkSq[(size_t)blk * t.w];
-                for (int z2 = 0; z2 < t.b; ++z2) B0[z2] = bset[(size_t)br * t.b + z2];
-                if (blk != lastBlk) { fr.build(g, t, W); lastBlk = blk; }
-                Acc a;
-                evalPos(g, t, capW, capB, W, B0, stm, a, (int)blk, fr);
-                ++loc;
-                // Write ONLY at the bucket equal to the value's own magnitude,
-                // which keeps every write in increasing-depth order and is what
-                // makes `a.best` the true shortest win when it is taken.
-                S16 nv;
-                if (a.best) {
-                    if (a.best != d) { out.push_back({ a.best, key }); continue; }
-                    nv = (S16)a.best;
-                } else if (a.anyUnknown) {
-                    std::atomic_ref<uint8_t>(outs[stm][i])
-                        .store((uint8_t)a.notWin, std::memory_order_relaxed);
-                    continue;
-                } else if (!a.moves || a.anyDraw) {
-                    nv = 0;
-                } else {
-                    if (a.worst != d) { out.push_back({ a.worst, key }); continue; }
-                    nv = (S16)-a.worst;
+            U64 lo, hi;
+            while (claim(lo, hi)) {
+                for (U64 z = lo; z < hi; ++z) {
+                    const U64 key = work[(size_t)z], i = key >> 1;
+                    const int stm = (int)(key & 1);
+                    if (t.get(stm, i) != UNK) continue;
+                    const U64 blk = i / t.nb, br = i % t.nb;
+                    const int* W = (const int*)&sy.blkSq[(size_t)blk * t.w];
+                    for (int z2 = 0; z2 < t.b; ++z2) B0[z2] = bset[(size_t)br * t.b + z2];
+                    if (blk != lastBlk) { fr.build(g, t, W); lastBlk = blk; }
+                    Acc a;
+                    evalPos(g, t, capW, capB, W, B0, stm, a, (int)blk, fr);
+                    ++loc;
+                    // Write ONLY at the bucket equal to the value's own magnitude,
+                    // which keeps every write in increasing-depth order and is what
+                    // makes `a.best` the true shortest win when it is taken.
+                    S16 nv;
+                    if (a.best) {
+                        if (a.best != d) { out.push_back({ a.best, key }); continue; }
+                        nv = (S16)a.best;
+                    } else if (a.anyUnknown) {
+                        std::atomic_ref<uint8_t>(outs[stm][i])
+                            .store((uint8_t)a.notWin, std::memory_order_relaxed);
+                        continue;
+                    } else if (!a.moves || a.anyDraw) {
+                        nv = 0;
+                    } else {
+                        if (a.worst != d) { out.push_back({ a.worst, key }); continue; }
+                        nv = (S16)-a.worst;
+                    }
+                    t.put(stm, i, nv);
+                    if (nv == 0) continue;
+                    const int mag = nv < 0 ? -nv : nv;
+                    forEachPredSlot(g, t, sy, W, B0, stm, &fr, [&](U64 pi, int ps) {
+                        if (t.get(ps, pi) != UNK) return;
+                        const U64 pk = (pi << 1) | (U64)ps;
+                        // mag == d here, so a predecessor woken by this value is a
+                        // win in exactly d + 1: the bitmap's depth.  Outside the
+                        // bitmap path the list still carries the depth.
+                        if (nv >= 0 && !decOuts(ps, pi)) return;
+                        if (useBits) { if (setNext(pk)) ++newb; }
+                        else         out.push_back({ mag + 1, (uint64_t)pk });
+                    });
                 }
-                t.put(stm, i, nv);
-                if (nv == 0) continue;
-                const int mag = nv < 0 ? -nv : nv;
-                forEachPredSlot(g, t, sy, W, B0, stm, &fr, [&](U64 pi, int ps) {
-                    if (t.get(ps, pi) != UNK) return;
-                    const U64 pk = (pi << 1) | (U64)ps;
-                    // mag == d here, so a predecessor woken by this value is a
-                    // win in exactly d + 1: the bitmap's depth.  Outside the
-                    // bitmap path the list still carries the depth.
-                    if (nv >= 0 && !decOuts(ps, pi)) return;
-                    if (useBits) { if (setNext(pk)) ++newb; }
-                    else         out.push_back({ mag + 1, (uint64_t)pk });
-                });
             }
             evalsA += loc;
             nsetT[(size_t)q] = newb;
@@ -1055,17 +1089,10 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
         };
 
         Timer tP;
-        if (work.size() < kParMin || nthr < 2) {
-            run(0, 0, work.size());
-        } else {
-            std::vector<std::thread> th;
-            const size_t chunk = (work.size() + nthr - 1) / nthr;
-            for (int q = 0; q < nthr; ++q) {
-                size_t lo = std::min(q * chunk, work.size()), hi = std::min(lo + chunk, work.size());
-                if (lo < hi) th.emplace_back(run, q, lo, hi);
-            }
-            for (auto& x : th) x.join();
-        }
+        // The keys are in slot order, so a chunk of them mostly shares a block
+        // and reuses the frame memo; a thousand is enough to bury the atomic
+        // and still leaves a short tail.
+        parDyn(work.size() < kParMin ? 1 : nthr, work.size(), 1024, run);
         if (kQueueCount) gTpar += tP.s();
         Timer tM;
         for (auto& v : wk) for (const Wake& e : v) bucket[e.d].push_back(e.key);
