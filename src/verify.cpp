@@ -94,15 +94,33 @@ U64 Table::verify(int threads, U64 stride, bool progress) const {
                             // is a draw -- except in KNNNK, where two knights
                             // can mate and the answer comes from the KNNK
                             // table this one is attached to.
+                            // With two unlike white men the surviving
+                            // material -- and so the table to read -- depends
+                            // on which man was taken.
+                            const Table* cs = subFor[cap];
                             U8 cv = V_DRAW;
-                            if (sub) {
+                            if (cs) {
+                                // In the sub-table's own order.  This table
+                                // may name its men pair-first (KQNNK is N,N,Q)
+                                // where the sub-table names them by strength
+                                // (KQNK is Q,N); handing the leftovers over in
+                                // this table's order would read the entry with
+                                // the two men exchanged.
                                 Pos r;
                                 r.wk = p.wk;
                                 r.bk = t;
+                                Sq  left[MAXWP];
+                                Piece lp[MAXWP];
                                 int k = 0;
                                 for (int i = 0; i < mat.np; ++i)
-                                    if (i != cap) r.wp[k++] = p.wp[i];
-                                cv = sub->valueAt(r, true);
+                                    if (i != cap) { left[k] = p.wp[i]; lp[k] = mat.piece[i]; ++k; }
+                                bool used[MAXWP] = { false, false, false };
+                                for (int j = 0; j < k; ++j)
+                                    for (int i = 0; i < k; ++i)
+                                        if (!used[i] && lp[i] == cs->mat.piece[j]) {
+                                            r.wp[j] = left[i]; used[i] = true; break;
+                                        }
+                                cv = cs->valueAt(r, true);
                             }
                             if (!isDtm(cv)) { allWin = false; return; }
                             if (cv > worst) worst = cv;

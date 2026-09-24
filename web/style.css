@@ -1,0 +1,416 @@
+/* style.css -- one sheet for both pages.
+ *
+ * The board is a CSS grid of n x n squares sized from a single custom
+ * property, so the board-size slider changes one number and nothing else. */
+
+:root {
+  --bg: #16181c;
+  --panel: #1e2126;
+  --panel-2: #24282f;
+  --line: #333943;
+  --ink: #e6e8ec;
+  --ink-dim: #99a1ad;
+  --accent: #7aa2f7;
+
+  --light: #b9a084;
+  --dark: #75543c;
+  --from: #cfae4a;
+  --to: #e0c15e;
+  --sel: #6fbf73;
+
+  --win: #5fb96b;
+  --draw: #8a93a0;
+  --loss: #d1626b;
+
+  --sq: 54px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 15px/1.5 ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+header {
+  padding: 22px 26px 14px;
+  border-bottom: 1px solid var(--line);
+}
+header h1 { margin: 0 0 6px; font-size: 20px; font-weight: 650; letter-spacing: .2px; }
+header p  { margin: 0; color: var(--ink-dim); max-width: 78ch; }
+header .back { display: inline-block; margin-bottom: 8px; font-size: 13px; }
+
+main { padding: 22px 26px 60px; }
+
+/* ---- catalogue --------------------------------------------------------- */
+
+h2.group {
+  margin: 30px 0 12px;
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(268px, 1fr));
+  gap: 12px;
+}
+
+.card {
+  display: block;
+  padding: 14px 16px 13px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: inherit;
+}
+.card:hover { border-color: var(--accent); text-decoration: none; background: var(--panel-2); }
+.card .label { font-size: 17px; font-weight: 650; }
+.card .glyphs { font-size: 22px; line-height: 1.1; margin: 4px 0 6px; }
+.card .title { color: var(--ink); font-size: 13px; }
+.card .blurb { color: var(--ink-dim); font-size: 13px; margin-top: 6px; }
+.card .meta  { margin-top: 9px; font-size: 12px; color: var(--ink-dim); display: flex; gap: 8px; flex-wrap: wrap; }
+
+.tag {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  font-size: 11px;
+  letter-spacing: .04em;
+}
+.tag.on { border-color: #3f6b46; color: #9bd6a4; }
+
+/* ---- the store inventory ----------------------------------------------- */
+/* Hundreds of rows, so this is a list rather than cards: one line per
+ * configuration and one small link per board size already solved. */
+
+.filter {
+  display: block;
+  width: 100%;
+  max-width: 420px;
+  margin: 10px 0 14px;
+  padding: 7px 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+.filter:focus { outline: none; border-color: var(--accent); }
+
+.dgroup { margin-bottom: 10px; }
+.dgroup > summary {
+  cursor: pointer;
+  padding: 7px 0;
+  font-size: 12px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+.dgroup > summary:hover { color: var(--ink); }
+.dgroup .count {
+  margin-left: 6px;
+  padding: 0 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  font-size: 11px;
+  letter-spacing: 0;
+}
+
+.drows {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.drow {
+  display: grid;
+  grid-template-columns: minmax(180px, 230px) 1fr 74px;
+  gap: 10px;
+  align-items: center;
+  padding: 6px 12px;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+}
+.drow:first-child { border-top: none; }
+.drow:nth-child(even) { background: var(--panel-2); }
+.drow .dmat { display: flex; align-items: center; gap: 7px; }
+.drow .dglyph { font-size: 17px; line-height: 1; white-space: nowrap; }
+.drow .dlabel { font-size: 13px; font-weight: 600; white-space: nowrap; }
+.drow .dsizes { display: flex; flex-wrap: wrap; gap: 4px; }
+.drow .dbytes {
+  text-align: right;
+  font-size: 12px;
+  color: var(--ink-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.chip {
+  display: inline-block;
+  min-width: 25px;
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--ink-dim);
+  font-size: 12px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.chip:hover { border-color: var(--accent); color: var(--ink); text-decoration: none; }
+
+@media (max-width: 720px) {
+  .drow { grid-template-columns: 1fr; gap: 4px; }
+  .drow .dbytes { text-align: left; }
+}
+
+/* The two rule sets, kept visibly apart wherever both appear. */
+.ruleset { margin: 6px 0 22px; }
+.ruleset > h3 {
+  margin: 0 0 2px;
+  font-size: 15px;
+  font-weight: 650;
+  padding-left: 10px;
+  border-left: 3px solid var(--line);
+}
+.ruleset.capture > h3 { border-left-color: #b98a3a; }
+.ruleset.mate > h3    { border-left-color: var(--accent); }
+.ruleset > h3 .count {
+  margin-left: 8px;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--ink-dim);
+  border: none;
+  background: none;
+  padding: 0;
+  letter-spacing: 0;
+}
+.ruleset > p.sub { margin: 0 0 10px; padding-left: 13px; max-width: 78ch; }
+.ruleset .dgroup { margin-left: 13px; }
+
+h2.rulehead {
+  margin: 34px 0 4px;
+  font-size: 17px;
+  font-weight: 650;
+  padding-left: 10px;
+  border-left: 3px solid var(--accent);
+}
+h2.rulehead + h2.group { margin-top: 12px; }
+
+.tag.cap  { border-color: #7a5a24; color: #dcb463; }
+.tag.mate { border-color: #35507e; color: #9fbdf0; }
+
+/* The two doors on the front page, one per rule set. */
+.doors {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 16px;
+  margin-bottom: 8px;
+}
+.door {
+  display: block;
+  padding: 20px 22px 18px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: inherit;
+}
+.door:hover { text-decoration: none; background: var(--panel-2); }
+.door.mate:hover    { border-color: var(--accent); }
+.door.capture:hover { border-color: #b98a3a; }
+.door h2 { margin: 6px 0 4px; font-size: 21px; font-weight: 650; }
+.door p  { margin: 0; color: var(--ink-dim); font-size: 14px; max-width: 46ch; }
+.door .glyphs { font-size: 26px; line-height: 1.1; }
+.door .meta { margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; font-size: 12px; }
+
+/* The piece count, which is how the two rule-set pages are organised. */
+h2.menhead {
+  margin: 34px 0 10px;
+  padding-bottom: 6px;
+  font-size: 19px;
+  font-weight: 650;
+  border-bottom: 1px solid var(--line);
+}
+h2.menhead .count {
+  margin-left: 10px;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--ink-dim);
+  border: none;
+  background: none;
+  padding: 0;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.covgroup { margin: 0 0 18px; }
+
+/* One group of the coverage listing: solved, solvable, and out of reach. */
+.cov { margin: 26px 0; }
+.cov > h3 {
+  margin: 0 0 2px;
+  font-size: 15px;
+  font-weight: 650;
+  padding-left: 10px;
+  border-left: 3px solid var(--line);
+}
+.cov > p.sub { margin: 0 0 10px; padding-left: 13px; }
+.cov .labels .lbl { display: inline-block; margin: 0 10px 2px 0; }
+.cov .labels .lbl[hidden] { display: none; }
+
+.cov .labels {
+  margin: 6px 0 2px;
+  padding: 10px 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink-dim);
+  font-size: 12.5px;
+  line-height: 1.7;
+  word-spacing: .05em;
+}
+
+/* ---- explorer ---------------------------------------------------------- */
+
+.cols {
+  display: grid;
+  grid-template-columns: auto minmax(320px, 420px);
+  gap: 26px;
+  align-items: start;
+}
+@media (max-width: 980px) { .cols { grid-template-columns: 1fr; } }
+
+.boardwrap { display: inline-block; }
+
+.board {
+  display: grid;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  overflow: hidden;
+  user-select: none;
+}
+
+.sq {
+  width: var(--sq);
+  height: var(--sq);
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: calc(var(--sq) * 0.78);
+  line-height: 1;
+  cursor: default;
+}
+.sq.l { background: var(--light); }
+.sq.d { background: var(--dark); }
+.sq.from::after, .sq.to::after {
+  content: ""; position: absolute; inset: 0; background: var(--from); opacity: .45;
+}
+.sq.to::after { background: var(--to); }
+.sq.sel::after { content: ""; position: absolute; inset: 0; background: var(--sel); opacity: .45; }
+.sq .man { position: relative; z-index: 1; }
+/* The solid glyphs for both sides, told apart by colour: the outline ones are
+ * missing or badly aligned in too many fonts, and half these endgames have the
+ * same man on both sides anyway.  Also used on the catalogue cards, which is
+ * why these are not scoped to .sq. */
+.man.w { color: #fbfbfb; text-shadow: 0 0 1px #000, 0 0 2px #000, 1px 1px 0 #0009; }
+.man.b { color: #17181a; text-shadow: 0 0 1px #fff6, 1px 1px 0 #0006; }
+.card .man.b { color: #2b2f36; text-shadow: 0 0 1px #8a93a0; }
+.sq.pick { cursor: pointer; }
+.sq .dot {
+  position: absolute; z-index: 2;
+  width: 28%; height: 28%; border-radius: 50%;
+  background: #1c1f24; opacity: .38;
+}
+.sq.cap .dot { width: 84%; height: 84%; border-radius: 50%; background: none;
+               border: calc(var(--sq) * 0.07) solid #1c1f2466; }
+
+.coords { color: var(--ink-dim); font-size: 11px; }
+.filerow { display: grid; margin-top: 3px; }
+.filerow div { text-align: center; }
+.rankcol { display: grid; margin-right: 4px; }
+.rankcol div { display: flex; align-items: center; justify-content: flex-end; width: 18px; }
+.boardrow { display: flex; align-items: flex-start; }
+
+.controls {
+  margin-top: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px 18px;
+  align-items: center;
+  max-width: 640px;
+}
+.controls label { font-size: 13px; color: var(--ink-dim); }
+.controls input[type=range] { width: 200px; vertical-align: middle; }
+.nval { display: inline-block; min-width: 3.6em; color: var(--ink); font-variant-numeric: tabular-nums; }
+
+button {
+  font: inherit; font-size: 13px;
+  padding: 5px 11px;
+  background: var(--panel-2);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: .45; cursor: default; }
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+}
+.panel h3 {
+  margin: 0 0 10px; font-size: 12px; font-weight: 650;
+  letter-spacing: .12em; text-transform: uppercase; color: var(--ink-dim);
+}
+
+.verdict { font-size: 17px; font-weight: 600; }
+.verdict.white { color: var(--win); }
+.verdict.black { color: var(--loss); }
+.verdict.draw  { color: var(--draw); }
+.verdict.illegal { color: var(--loss); }
+.sub { color: var(--ink-dim); font-size: 13px; margin-top: 5px; }
+
+.moves { max-height: 52vh; overflow-y: auto; margin: 0 -6px; }
+.move {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 5px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+.move:hover { background: var(--panel-2); }
+.move.dead { cursor: default; opacity: .78; }
+.move .san { font-weight: 600; min-width: 7.5em; }
+.move .dtm { font-size: 13px; }
+.move .why { color: var(--ink-dim); font-size: 12px; }
+.move.win  .dtm { color: var(--win); }
+.move.draw .dtm { color: var(--draw); }
+.move.loss .dtm { color: var(--loss); }
+.move.best { box-shadow: inset 2px 0 0 var(--accent); }
+
+.hist { font-variant-numeric: tabular-nums; font-size: 13px; color: var(--ink-dim); word-spacing: .1em; }
+.hist b { color: var(--ink); font-weight: 600; }
+
+.err { color: var(--loss); }
+.busy { color: var(--ink-dim); }
+.busy::after {
+  content: ""; display: inline-block; width: .7em; height: .7em; margin-left: .5em;
+  border: 2px solid var(--ink-dim); border-top-color: transparent; border-radius: 50%;
+  animation: spin .8s linear infinite; vertical-align: -1px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }

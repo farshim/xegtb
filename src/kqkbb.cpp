@@ -92,11 +92,10 @@ struct Timer {
 // on any ray, which is what the three-blocker form of attacks() is for.
 // ---------------------------------------------------------------------------
 inline bool blackChecked(const Geometry& g, Sq wk, Sq bk, Sq wq, Sq b1, Sq b2) {
-    return wq >= 0 && g.attacks(Piece::Queen, wq, bk, wk, b1, b2);
+    return kqkbbBlackChecked(g, wk, bk, wq, b1, b2);
 }
 inline bool whiteChecked(const Geometry& g, Sq wk, Sq bk, Sq wq, Sq b1, Sq b2) {
-    return (b1 >= 0 && g.attacks(Piece::Bishop, b1, wk, bk, wq, b2)) ||
-           (b2 >= 0 && g.attacks(Piece::Bishop, b2, wk, bk, wq, b1));
+    return kqkbbWhiteChecked(g, wk, bk, wq, b1, b2);
 }
 
 // ---------------------------------------------------------------------------

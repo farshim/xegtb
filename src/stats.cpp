@@ -8,7 +8,16 @@
 
 namespace kqk {
 
-void Table::computeStats(int threads) {
+// Black not in check and nothing of White's hanging.  Kept in step with
+// sharedQuiet in explore.cpp; if one changes the other must.
+static bool statsQuiet(const Table& t, const Pos& p) {
+    if (blackInCheck(t.geo, t.mat, p)) return false;
+    bool grab = false;
+    genBlack(t.geo, t.mat, p, [&](Sq, int cap) { grab |= (cap >= 0); });
+    return !grab;
+}
+
+void Table::computeStats(int threads, bool quiet) {
     const Geometry& g = geo;
     const U32 npc = idx.npc;
     const bool staleLoss = stalemateLoss;
@@ -33,6 +42,15 @@ void Table::computeStats(int threads) {
                 if (vw == V_DEAD && vb == V_DEAD) continue;
                 idx.decode(pc, p.wp);
                 U64 orb = (U64)orbitSize(p);
+                const bool isQ = quiet && statsQuiet(*this, p);
+                if (isQ) {
+                    loc.fQuiet += orb;
+                    if (vw != V_DEAD) { if (isDtm(vw)) loc.fqwWin += orb; else loc.fqwDraw += orb; }
+                    if (vb != V_DEAD) { if (isDtm(vb)) loc.fqbLoss += orb; else loc.fqbDraw += orb; }
+                    if (vw != V_DEAD && isDtm(vw) && vw > loc.maxPlyQuiet) {
+                        loc.maxPlyQuiet = vw; loc.longestQuiet = p;
+                    }
+                }
 
                 if (vw != V_DEAD) {
                     ++loc.wLive; loc.fwLive += orb;
@@ -78,6 +96,13 @@ void Table::computeStats(int threads) {
         total.fwLive += loc.fwLive; total.fwWin += loc.fwWin; total.fwDraw += loc.fwDraw;
         total.fbLive += loc.fbLive; total.fbLoss += loc.fbLoss; total.fbDraw += loc.fbDraw;
         total.fbMate += loc.fbMate; total.fbStale += loc.fbStale; total.fbEnPrise += loc.fbEnPrise;
+        total.fQuiet += loc.fQuiet;
+        total.fqwWin += loc.fqwWin; total.fqwDraw += loc.fqwDraw;
+        total.fqbLoss += loc.fqbLoss; total.fqbDraw += loc.fqbDraw;
+        if (loc.maxPlyQuiet > total.maxPlyQuiet) {
+            total.maxPlyQuiet = loc.maxPlyQuiet;
+            total.longestQuiet = loc.longestQuiet;
+        }
         for (size_t i = 0; i < loc.histW.size(); ++i) {
             total.histW[i] += loc.histW[i];
             total.histWFull[i] += loc.histWFull[i];
@@ -91,6 +116,7 @@ void Table::computeStats(int threads) {
         }
     });
 
+    total.quietCensus = quiet;
     st = std::move(total);
 }
 

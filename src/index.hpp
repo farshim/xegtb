@@ -90,19 +90,39 @@ public:
     // cannot drift apart.
     template <Endgame EG>
     static inline void sortCfg(Sq* c) {
-        if constexpr (identicalOf(EG)) {
-            auto cx = [](Sq& x, Sq& y) { if (x > y) { Sq t = x; x = y; y = t; } };
+        constexpr CfgShape S = cfgShapeOf(EG);
+        auto cx = [](Sq& x, Sq& y) { if (x > y) { Sq t = x; x = y; y = t; } };
+        if constexpr (S == CfgShape::PairUnordered) cx(c[0], c[1]);
+        else if constexpr (S == CfgShape::TripleAlike) {
+            cx(c[0], c[1]); cx(c[1], c[2]); cx(c[0], c[1]);
+        } else if constexpr (S == CfgShape::TriplePairOdd) {
+            // Only the two alike ones are interchangeable; the odd man stays
+            // where he is.  Sorting all three here would merge positions that
+            // differ -- a rook on one square and a queen on the other is not
+            // the same thing as the reverse.
             cx(c[0], c[1]);
-            if constexpr (npOf(EG) == 3) { cx(c[1], c[2]); cx(c[0], c[1]); }
         }
     }
 
     template <Endgame EG>
     inline void decode(U32 pc, Sq out[MAXWP]) const {
-        if constexpr (npOf(EG) == 1)        out[0] = (Sq)pc;
-        else if constexpr (npOf(EG) == 3)   { out[0] = tripA[pc]; out[1] = tripB[pc]; out[2] = tripC[pc]; }
-        else if constexpr (identicalOf(EG)) { out[0] = pairA[pc]; out[1] = pairB[pc]; }
-        else { out[0] = (Sq)(pc / g.nsq); out[1] = (Sq)(pc % g.nsq); }
+        constexpr CfgShape S = cfgShapeOf(EG);
+        if constexpr (S == CfgShape::One) out[0] = (Sq)pc;
+        else if constexpr (S == CfgShape::TripleAlike) {
+            out[0] = tripA[pc]; out[1] = tripB[pc]; out[2] = tripC[pc];
+        } else if constexpr (S == CfgShape::TriplePairOdd) {
+            // The pair's index, then the odd man's square: a mixed radix with
+            // C(nsq, 2) on one side and nsq on the other.
+            const U32 q = pc / (U32)g.nsq, r = pc % (U32)g.nsq;
+            out[0] = pairA[q]; out[1] = pairB[q]; out[2] = (Sq)r;
+        } else if constexpr (S == CfgShape::TripleOrdered) {
+            const U32 nsq = (U32)g.nsq;
+            out[0] = (Sq)(pc / (nsq * nsq));
+            out[1] = (Sq)((pc / nsq) % nsq);
+            out[2] = (Sq)(pc % nsq);
+        } else if constexpr (S == CfgShape::PairUnordered) {
+            out[0] = pairA[pc]; out[1] = pairB[pc];
+        } else { out[0] = (Sq)(pc / g.nsq); out[1] = (Sq)(pc % g.nsq); }
     }
     // Dispatched through KQK_DISPATCH rather than a switch of its own: a
     // hand-written switch with a `default` silently sends a new endgame to
@@ -119,12 +139,21 @@ public:
     // -1 when the squares coincide, which is not a configuration.
     template <Endgame EG>
     inline int32_t encode(const Sq* s) const {
-        if constexpr (npOf(EG) == 1) return s[0];
-        else if constexpr (npOf(EG) == 3) {
+        constexpr CfgShape S = cfgShapeOf(EG);
+        if constexpr (S == CfgShape::One) return s[0];
+        else if constexpr (S == CfgShape::TripleAlike) {
             Sq c[3] = { s[0], s[1], s[2] };
             sortCfg<EG>(c);
             if (c[0] == c[1] || c[1] == c[2]) return -1;
             return tripBase[(size_t)c[0] * g.nsq + c[1]] + c[2];
+        } else if constexpr (S == CfgShape::TriplePairOdd) {
+            Sq c[3] = { s[0], s[1], s[2] };
+            sortCfg<EG>(c);
+            if (c[0] == c[1] || c[0] == c[2] || c[1] == c[2]) return -1;
+            return (int32_t)((U64)(pairBase[c[0]] + c[1]) * g.nsq + c[2]);
+        } else if constexpr (S == CfgShape::TripleOrdered) {
+            if (s[0] == s[1] || s[0] == s[2] || s[1] == s[2]) return -1;
+            return (int32_t)(((U64)s[0] * g.nsq + s[1]) * g.nsq + s[2]);
         } else if constexpr (identicalOf(EG)) {
             Sq a = s[0], b = s[1];
             if (a == b) return -1;
@@ -323,6 +352,12 @@ public:
             if (cfg[i] == wk || cfg[i] == bk) return false;
         if constexpr (npOf(EG) == 2)
             if (cfg[0] == cfg[1]) return false;
+        // Two of three men on one square is representable in the ordered and
+        // the pair-plus-odd codecs -- it was not in the unordered triple, the
+        // only three-man shape there used to be -- and denotes nothing.
+        if constexpr (cfgShapeOf(EG) == CfgShape::TripleOrdered ||
+                      cfgShapeOf(EG) == CfgShape::TriplePairOdd)
+            if (cfg[0] == cfg[1] || cfg[0] == cfg[2] || cfg[1] == cfg[2]) return false;
         return true;
     }
     inline bool cfgLive(const Sq* cfg, Sq wk, Sq bk) const {
@@ -374,14 +409,41 @@ private:
         }
         nkk = kkWk.size();
 
-        if (mat.np == 1) {
+        // Sized by SHAPE and nothing else.  Keying this off `np` and a single
+        // "identical" flag is what made KQQQK come out with 256
+        // configurations per king pair instead of 560: three alike queens
+        // fell through to the ordered-PAIR branch, and the table was the
+        // wrong size before a single position was solved.
+        const CfgShape shape = cfgShapeOf(mat.eg);
+        if (shape == CfgShape::TripleOrdered) {
+            npc = (U32)((U64)nsq * nsq * nsq);
+        } else if (shape == CfgShape::TriplePairOdd) {
+            // The unordered pair of the two alike men, times the odd man's
+            // square.  The pair codec is the same one KBBK uses; it is built
+            // here as well because this shape needs it and does not use the
+            // triple tables at all.
+            pairBase.assign((size_t)nsq, 0);
+            U64 id = 0;
+            for (Sq a = 0; a < nsq; ++a) {
+                pairBase[a] = (int32_t)(id - (U64)(a + 1));
+                id += (U64)(nsq - 1 - a);
+            }
+            const U32 npair = (U32)id;           // = C(nsq, 2)
+            pairA.resize(npair); pairB.resize(npair);
+            for (Sq a = 0; a < nsq; ++a)
+                for (Sq b = a + 1; b < nsq; ++b) {
+                    const int32_t t = pairBase[a] + b;
+                    pairA[t] = a; pairB[t] = b;
+                }
+            npc = (U32)((U64)npair * nsq);
+        } else if (shape == CfgShape::One) {
             npc = (U32)nsq;
-        } else if (!mat.identical) {
+        } else if (shape == CfgShape::PairOrdered) {
             // Ordered pair, mixed radix.  The n^2 entries with both pieces on
             // one square are dead, which is a 1-in-n^2 waste and buys a codec
             // with no tables and no division on the hot path.
             npc = (U32)((U64)nsq * nsq);
-        } else if (mat.np == 3) {
+        } else if (shape == CfgShape::TripleAlike) {
             // Unordered triples, counted out once so that the base table and
             // the decode tables cannot disagree about the numbering.
             tripBase.assign((size_t)nsq * nsq, -1);

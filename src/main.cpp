@@ -1,5 +1,9 @@
 // main.cpp -- command line front end.
 #include "table.hpp"
+#include "explore.hpp"
+#include "general.hpp"
+#include "genindex.hpp"
+#include <set>
 
 #include <chrono>
 #include <cstdio>
@@ -76,8 +80,35 @@ usage:
   egtb kings   [--min N] [--max N] [-n N] [--white W] [--black B]
                            [--verify] [--brute] [--line] [--progress]
                            [--probe SQ,...]
+                           [--quiet-stats  -- also census the QUIET placements,
+                              those where neither side has a capture available.
+                              Two move generations a placement, so it is opt-in]
+                           [--stats-csv FILE  -- append one row per table to a
+                              statistics file: positions, whether the material
+                              is always won (for the side to move, and for
+                              White) outright and from quiet placements, the
+                              deepest win each way outright and from quiet, and
+                              the win/draw/loss split both ways.  Implies
+                              --quiet-stats; the header is written once]
   egtb selftest [--max N] [--brute N] [--threads T]
   egtb sizes [--max N] [--endgame E] [--kqkbb]
+  egtb serve [--port P] [--root DIR] [--tables DIR] [--no-tables]
+                             [--read-only] [--save-over SECONDS]
+
+  serve puts a board in a web browser: pick a configuration, slide the board
+  size, and every legal move is listed beside it with the depth to mate it
+  leads to.  It listens on 127.0.0.1 only and serves its HTML out of web/ --
+  which it looks for beside the working directory unless --root says otherwise.
+
+  --tables DIR is a store of solved tables, read first and written second: the
+  file for a configuration and board is loaded if it is there, and otherwise
+  the table is solved and then written for next time.  A file that will not
+  load, for any reason, is a miss and nothing more.  It defaults to
+  artifacts/tables; --no-tables solves everything in memory and keeps none,
+  and --read-only reads the store without adding to it.  Solving a table that
+  takes no time is not worth a file -- and some are enormous, KQKBB on 8 x 8
+  being 212 MB -- so a table is written only when solving it cost more than
+  --save-over seconds, 2 by default.
 
   --scratch DIR puts the two value arrays in a file under DIR instead of in
   anonymous memory, so a table larger than RAM is paged against the disk rather
@@ -394,28 +425,12 @@ void bishopColourSplit(const Table& t, ColourClass& light, ColourClass& dark,
 bool gNoSub = false;     // --no-sub: skip the sub-table, to test the guard
 bool gStaleLoss = false; // --capture: score stalemate as a loss (see Table)
 
+// The command line's `--no-sub` reads the chain out, so that a run can show
+// what the tables look like without it; everything else is in solver.cpp, so
+// that serve.cpp builds the same chain the same way.
 std::unique_ptr<Table> attachSub(Table& t, int threads, bool progress) {
     if (gNoSub) return nullptr;
-    Endgame need;
-    if (t.mat.eg == Endgame::KNNNK)                        need = Endgame::KNNK;
-    else if (t.mat.eg == Endgame::KNNK && t.stalemateLoss) need = Endgame::KNK;
-    // KBBK is the same case one material over: under capture rules ...KxB
-    // leaves K+B vs K, which a bare king does not always survive.
-    else if (t.mat.eg == Endgame::KBBK && t.stalemateLoss) need = Endgame::KBK;
-    else return nullptr;
-    auto sub = std::make_unique<Table>(t.n, need);
-    sub->stalemateLoss = t.stalemateLoss;
-    if (progress)
-        std::fprintf(stderr, "  sub-table %dx%d %s: %llu entries/side\n",
-                     t.n, t.n, sub->mat.name(), (unsigned long long)sub->idx.nslots);
-    // The chain can be two deep: KNNNK -> KNNK -> KNK under capture rules.
-    // KBBK -> KBK is one deep and stops there, KBK's only capture leaving
-    // bare kings.
-    auto deeper = attachSub(*sub, threads, false);
-    sub->generate(threads, false);
-    if (deeper) sub->keepAlive = std::move(deeper);
-    t.sub = sub.get();
-    return sub;
+    return attachSubTable(t, threads, progress);
 }
 
 // The terminal positions of the same-coloured KBBK capture table: Black to
@@ -827,6 +842,50 @@ int cmdPolicy(int argc, char** argv) {
 }
 
 
+// A row for the armed-Black solvers (KQKR, KQKB, KQKBB, KQKK).  They keep
+// their own stats structs and their own census loops, none of which decode the
+// placement, so the QUIET columns are written "na" rather than guessed: those
+// solvers have no quiet census yet.  Everything the schema can honestly carry
+// from what they do compute is filled in.
+static void statsCsvRowArmed(const std::string& path, const char* cfg, int n,
+                             int w, int b, U64 positions,
+                             U64 wWin, U64 wDraw, U64 wLoss,
+                             U64 bWin, U64 bDraw, U64 bLoss,
+                             int deepestWhite, int deepestBlack) {
+    bool fresh = true;
+    if (std::FILE* f = std::fopen(path.c_str(), "rb")) {
+        std::fseek(f, 0, SEEK_END); fresh = std::ftell(f) == 0; std::fclose(f);
+    }
+    std::FILE* f = std::fopen(path.c_str(), "ab");
+    if (!f) { std::fprintf(stderr, "cannot append to %s\n", path.c_str()); return; }
+    if (fresh)
+        std::fprintf(f,
+            "config,n,w,b,white_piece,black_piece,positions,quiet_positions,"
+            "always_win_stm,always_win_white,quiet_always_win_stm,quiet_always_win_white,"
+            "deepest_white,deepest_black,deepest_white_quiet,deepest_black_quiet,"
+            "wtm_win,wtm_draw,wtm_loss,btm_win,btm_draw,btm_loss,"
+            "wtm_win_pct,wtm_draw_pct,wtm_loss_pct,btm_win_pct,btm_draw_pct,btm_loss_pct,"
+            "q_wtm_win,q_wtm_draw,q_wtm_loss,q_btm_win,q_btm_draw,q_btm_loss,"
+            "q_wtm_win_pct,q_wtm_draw_pct,q_wtm_loss_pct,"
+            "q_btm_win_pct,q_btm_draw_pct,q_btm_loss_pct,"
+            "deepest_white_pos,deepest_white_quiet_pos\n");
+    auto pct = [](U64 x, U64 tot) { return tot ? 100.0 * (double)x / (double)tot : 0.0; };
+    const bool awWhite = wDraw == 0 && wLoss == 0 && bDraw == 0 && bLoss == 0;
+    const bool awStm   = wDraw == 0 && wLoss == 0 && bWin == 0 && bDraw == 0;
+    std::fprintf(f, "%s,%d,%d,%d,armed,armed,%llu,na,%d,%d,na,na,%d,%d,na,na,",
+                 cfg, n, w, b, (unsigned long long)positions,
+                 awStm ? 1 : 0, awWhite ? 1 : 0, deepestWhite, deepestBlack);
+    std::fprintf(f, "%llu,%llu,%llu,%llu,%llu,%llu,",
+                 (unsigned long long)wWin, (unsigned long long)wDraw, (unsigned long long)wLoss,
+                 (unsigned long long)bWin, (unsigned long long)bDraw, (unsigned long long)bLoss);
+    const U64 Pw = wWin + wDraw + wLoss, Pb = bWin + bDraw + bLoss;
+    std::fprintf(f, "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,",
+                 pct(wWin, Pw), pct(wDraw, Pw), pct(wLoss, Pw),
+                 pct(bWin, Pb), pct(bDraw, Pb), pct(bLoss, Pb));
+    std::fprintf(f, "na,na,na,na,na,na,na,na,na,na,na,na,\"\",\"\"\n");
+    std::fclose(f);
+}
+
 // `egtb kqkr` -- king and queen against king and one black man: a rook, or
 // under --bishop a bishop (KQKB, which `egtb kqkbb` converts into).  Signed
 // entries, and conversion into KQK and into KRK or KBK.
@@ -837,6 +896,7 @@ int cmdKqkr(int argc, char** argv) {
     bool draws = false;
     bool capture = false;
     std::string probe, lineFrom;
+    std::string csvPath;            // --stats-csv: one row per board, appended
     bool selfcheck = false;
     for (int i = 0; i < argc; ++i) {
         std::string k = argv[i];
@@ -856,6 +916,7 @@ int cmdKqkr(int argc, char** argv) {
         else if (k == "--capture" || k == "--stalemate-loss") capture = true;
         else if (k == "--line-from") lineFrom = val();
         else if (k == "--bishop")   eg = Endgame::KQKB;
+        else if (k == "--stats-csv") csvPath = val();
         else if (k == "--rook")     eg = Endgame::KQKR;
         else if (k == "--endgame") {
             std::string v = val();
@@ -899,6 +960,19 @@ int cmdKqkr(int argc, char** argv) {
                     (unsigned long long)t.st.wWin, (unsigned long long)t.st.wDraw,
                     (unsigned long long)t.st.wLoss, t.st.maxWinPly, t.st.seconds,
                     checks.c_str());
+        if (!csvPath.empty()) {
+            // The rule set has to be in the NAME, not only in the numbers.
+            // Without it the capture reading of KQKR and the mating one are
+            // both "KQKR" on the same board with different depths, and
+            // anything reading the file back -- the web front end included --
+            // has no way to tell which it is holding.  The shared solver has
+            // said "-capture" all along; this says it too.
+            const std::string cfg = std::string(t.mat.name()) + (capture ? "-capture" : "");
+            statsCsvRowArmed(csvPath, cfg.c_str(), n, 2, 2, t.st.wLegal,
+                             t.st.wWin, t.st.wDraw, t.st.wLoss,
+                             t.st.bWin, t.st.bDraw, t.st.bLoss,
+                             t.st.maxWinPly, t.st.maxLossPly);
+        }
         const std::string bl = t.mat.label(1);          // "bR" or "bB"
         const Pos& d = t.st.deepest;
         std::printf("      deepest white win: wK %s, wQ %s, bK %s, %s %s -- mate in %d\n",
@@ -1097,6 +1171,7 @@ int cmdKqkr(int argc, char** argv) {
 int cmdKqkbb(int argc, char** argv) {
     int lo = 3, hi = 6;
     bool verify = false, brute = false, progress = false, line = false, hist = false;
+    std::string out;                // -o FILE: write the table out
     bool selfcheck = false;
     std::string probe;
     for (int i = 0; i < argc; ++i) {
@@ -1106,6 +1181,7 @@ int cmdKqkbb(int argc, char** argv) {
         else if (k == "--max")       hi = std::atoi(val().c_str());
         else if (k == "-n")          lo = hi = std::atoi(val().c_str());
         else if (k == "--threads")   gThreads = std::atoi(val().c_str());
+        else if (k == "-o")        out = val();
         else if (k == "--verify")    verify = true;
         else if (k == "--brute")     brute = true;
         else if (k == "--progress")  progress = true;
@@ -1129,6 +1205,14 @@ int cmdKqkbb(int argc, char** argv) {
     for (int n = lo; n <= hi; ++n) {
         TableKQKBB t(n);
         t.generate(gThreads, progress);
+        if (!out.empty()) {
+            // One file per board, so -o names a pattern rather than a file when
+            // a range is asked for: "%d" is replaced by the board size.
+            std::string path = out;
+            const size_t pc = path.find("%d");
+            if (pc != std::string::npos) path.replace(pc, 2, std::to_string(n));
+            t.save(path, false);
+        }
         std::string checks;
         if (verify) {
             U64 m = t.verify(gThreads, progress);
@@ -2207,10 +2291,87 @@ static int capPieceParse(const std::string& t, bool& ok) {
 // `egtb mixed` -- two unlike white men against one black man.  See
 // src/mixed.cpp.  Unreduced, so it is also the cross-check on the D4-reduced
 // solver: give it two LIKE men and it must reproduce `egtb rooks` exactly.
+
+// The same row and the same columns as the kings collector, so one statistics
+// file holds both families.  A mixed configuration has two UNLIKE white men,
+// which the schema's single white_piece column carries as "king+bishop"; that
+// plus-sign is what tells a reader (and serve.cpp) that the row is a mixed one
+// and its family id is spelled differently.  There is no D4 reduction here, so
+// every placement is already a real position and no orbit weighting applies.
+static void statsCsvRowMixed(const std::string& path, int p0, int p1, int pb,
+                             const MixedStats& s, const Geometry& g) {
+    bool fresh = true;
+    if (std::FILE* f = std::fopen(path.c_str(), "rb")) {
+        std::fseek(f, 0, SEEK_END); fresh = std::ftell(f) == 0; std::fclose(f);
+    }
+    std::FILE* f = std::fopen(path.c_str(), "ab");
+    if (!f) { std::fprintf(stderr, "mixed: cannot append to %s\n", path.c_str()); return; }
+    if (fresh)
+        std::fprintf(f,
+            "config,n,w,b,white_piece,black_piece,positions,quiet_positions,"
+            "always_win_stm,always_win_white,quiet_always_win_stm,quiet_always_win_white,"
+            "deepest_white,deepest_black,deepest_white_quiet,deepest_black_quiet,"
+            "wtm_win,wtm_draw,wtm_loss,btm_win,btm_draw,btm_loss,"
+            "wtm_win_pct,wtm_draw_pct,wtm_loss_pct,btm_win_pct,btm_draw_pct,btm_loss_pct,"
+            "q_wtm_win,q_wtm_draw,q_wtm_loss,q_btm_win,q_btm_draw,q_btm_loss,"
+            "q_wtm_win_pct,q_wtm_draw_pct,q_wtm_loss_pct,"
+            "q_btm_win_pct,q_btm_draw_pct,q_btm_loss_pct,"
+            "deepest_white_pos,deepest_white_quiet_pos\n");
+
+    char cfg[16];
+    std::snprintf(cfg, sizeof cfg, "%c%cv%c", capPieceLetter(p0), capPieceLetter(p1),
+                  capPieceLetter(pb));
+    auto pct = [](U64 x, U64 tot) { return tot ? 100.0 * (double)x / (double)tot : 0.0; };
+    const bool awStm   = s.wDraw == 0 && s.wLoss == 0 && s.bWin == 0 && s.bDraw == 0;
+    const bool awWhite = s.wDraw == 0 && s.wLoss == 0 && s.bDraw == 0 && s.bLoss == 0;
+    const bool qAwStm   = s.qwDraw == 0 && s.qwLoss == 0 && s.qbWin == 0 && s.qbDraw == 0;
+    const bool qAwWhite = s.qwDraw == 0 && s.qwLoss == 0 && s.qbDraw == 0 && s.qbLoss == 0;
+    const bool haveQ = s.quiet > 0;
+
+    std::fprintf(f, "%s,%d,2,1,%s+%s,%s,%llu,%llu,", cfg, s.n,
+                 capPieceName(p0), capPieceName(p1), capPieceName(pb),
+                 (unsigned long long)s.positions, (unsigned long long)s.quiet);
+    if (haveQ) std::fprintf(f, "%d,%d,%d,%d,", awStm ? 1 : 0, awWhite ? 1 : 0,
+                            qAwStm ? 1 : 0, qAwWhite ? 1 : 0);
+    else       std::fprintf(f, "%d,%d,na,na,", awStm ? 1 : 0, awWhite ? 1 : 0);
+    // The one-man tables a capture converts into are censused separately by
+    // runMixed; a deepest BLACK win from a quiet placement is not among the
+    // figures it collects, so that column stays honest rather than guessing.
+    std::fprintf(f, "%d,%d,%d,na,", s.deepestWhite, s.deepestBlack, s.deepestWhiteQuiet);
+    std::fprintf(f, "%llu,%llu,%llu,%llu,%llu,%llu,",
+                 (unsigned long long)s.wWin, (unsigned long long)s.wDraw,
+                 (unsigned long long)s.wLoss, (unsigned long long)s.bWin,
+                 (unsigned long long)s.bDraw, (unsigned long long)s.bLoss);
+    std::fprintf(f, "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,",
+                 pct(s.wWin, s.positions), pct(s.wDraw, s.positions), pct(s.wLoss, s.positions),
+                 pct(s.bWin, s.positions), pct(s.bDraw, s.positions), pct(s.bLoss, s.positions));
+    std::fprintf(f, "%llu,%llu,%llu,%llu,%llu,%llu,",
+                 (unsigned long long)s.qwWin, (unsigned long long)s.qwDraw,
+                 (unsigned long long)s.qwLoss, (unsigned long long)s.qbWin,
+                 (unsigned long long)s.qbDraw, (unsigned long long)s.qbLoss);
+    std::fprintf(f, "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,",
+                 pct(s.qwWin, s.quiet), pct(s.qwDraw, s.quiet), pct(s.qwLoss, s.quiet),
+                 pct(s.qbWin, s.quiet), pct(s.qbDraw, s.quiet), pct(s.qbLoss, s.quiet));
+    auto place = [&](const std::vector<Sq>& v, int d) {
+        if (!d || v.size() < 3) { std::fprintf(f, "\"\""); return; }
+        std::fprintf(f, "\"w%c%s,w%c%s,b%c%s\"",
+                     capPieceLetter(p0), g.name(v[0]).c_str(),
+                     capPieceLetter(p1), g.name(v[1]).c_str(),
+                     capPieceLetter(pb), g.name(v[2]).c_str());
+    };
+    place(s.posWhite, s.deepestWhite);
+    std::fprintf(f, ",");
+    place(s.posWhiteQuiet, s.deepestWhiteQuiet);
+    std::fprintf(f, "\n");
+    std::fclose(f);
+}
+
 int cmdMixed(int argc, char** argv) {
     int lo = 3, hi = 0;
     int p0 = CP_KING, p1 = CP_QUEEN, pb = CP_KNIGHT;
     bool line = false, quiet = false, trace = false;
+    std::string csvPath;            // --stats-csv: one row per board, appended
+    std::string tbDir;              // --tb: a directory of .mx files, or empty
     for (int i = 0; i < argc; ++i) {
         std::string k = argv[i];
         auto val = [&]() { return (i + 1 < argc) ? std::string(argv[++i]) : std::string(); };
@@ -2225,6 +2386,8 @@ int cmdMixed(int argc, char** argv) {
         else if (k == "--line")    line = true;
         else if (k == "--trace")   { line = true; trace = true; }
         else if (k == "--quiet")   quiet = true;
+        else if (k == "--stats-csv") csvPath = val();
+        else if (k == "--tb")        tbDir = val();
         if (!ok) { std::fprintf(stderr, "mixed: pieces are king|queen|rook|bishop|knight\n"); return 2; }
     }
     if (!hi) hi = lo;
@@ -2238,7 +2401,7 @@ int cmdMixed(int argc, char** argv) {
     for (int n = lo; n <= hi; ++n) {
         MixedStats s;
         auto t0 = std::chrono::steady_clock::now();
-        runMixed(n, p0, p1, pb, gThreads, line, quiet, s);
+        runMixed(n, p0, p1, pb, gThreads, line, quiet, s, tbDir);
         s.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         std::printf("%3d %14llu  wtm %14llu %14llu %14llu %5d ply %8.2f\n",
                     n, (unsigned long long)s.positions, (unsigned long long)s.wWin,
@@ -2248,6 +2411,7 @@ int cmdMixed(int argc, char** argv) {
                     (unsigned long long)s.bWin, (unsigned long long)s.bDraw,
                     (unsigned long long)s.bLoss, s.deepestBlack);
         Geometry g(n);
+        if (!csvPath.empty()) statsCsvRowMixed(csvPath, p0, p1, pb, s, g);
         auto show = [&](const std::vector<Sq>& p, int d, const char* who) {
             if (!d) { std::printf("      no %s win\n", who); return; }
             std::printf("      deepest %s win: %c%s %c%s %c%s -- %d plies\n", who,
@@ -2279,6 +2443,104 @@ int cmdMixed(int argc, char** argv) {
     return 0;
 }
 
+// One row of the per-configuration statistics file, appended as each table is
+// finished so that a sweep across boards and materials accumulates into a
+// single CSV.  The header goes in only when the file is new, so the same file
+// can be handed to run after run.  Counts are kept beside the percentages
+// because a percentage cannot be summed back into anything.
+//
+// "Always a win for the side to move" and "always a win for White" are
+// different properties and both are worth having: KKK vs K is the second
+// without being the first, since Black to move is still lost rather than
+// winning.  Counts are White-relative, so Black winning reads as a White loss.
+static void statsCsvRow(const std::string& path, int pw, int pb, const KingsStats& s,
+                        const TableKings& tk) {
+    bool fresh = true;
+    if (std::FILE* f = std::fopen(path.c_str(), "rb")) {
+        std::fseek(f, 0, SEEK_END);
+        fresh = std::ftell(f) == 0;
+        std::fclose(f);
+    }
+    std::FILE* f = std::fopen(path.c_str(), "ab");
+    if (!f) { std::fprintf(stderr, "kings: cannot append to %s\n", path.c_str()); return; }
+    if (fresh)
+        std::fprintf(f,
+            "config,n,w,b,white_piece,black_piece,positions,quiet_positions,"
+            "always_win_stm,always_win_white,quiet_always_win_stm,quiet_always_win_white,"
+            "deepest_white,deepest_black,deepest_white_quiet,deepest_black_quiet,"
+            "wtm_win,wtm_draw,wtm_loss,btm_win,btm_draw,btm_loss,"
+            "wtm_win_pct,wtm_draw_pct,wtm_loss_pct,btm_win_pct,btm_draw_pct,btm_loss_pct,"
+            "q_wtm_win,q_wtm_draw,q_wtm_loss,q_btm_win,q_btm_draw,q_btm_loss,"
+            "q_wtm_win_pct,q_wtm_draw_pct,q_wtm_loss_pct,"
+            "q_btm_win_pct,q_btm_draw_pct,q_btm_loss_pct,"
+            "deepest_white_pos,deepest_white_quiet_pos\n");
+
+    const std::string cfg = std::string((size_t)s.w, capPieceLetter(pw)) + "v" +
+                            std::string((size_t)s.b, capPieceLetter(pb));
+    auto pct = [](U64 x, U64 tot) { return tot ? 100.0 * (double)x / (double)tot : 0.0; };
+    const bool awStm   = s.wDraw == 0 && s.wLoss == 0 && s.bWin == 0 && s.bDraw == 0;
+    const bool awWhite = s.wDraw == 0 && s.wLoss == 0 && s.bDraw == 0 && s.bLoss == 0;
+    const bool qAwStm   = s.qwDraw == 0 && s.qwLoss == 0 && s.qbWin == 0 && s.qbDraw == 0;
+    const bool qAwWhite = s.qwDraw == 0 && s.qwLoss == 0 && s.qbDraw == 0 && s.qbLoss == 0;
+    // Without the full pass the quiet fields hold nothing, and an empty quiet
+    // set makes the two quiet predicates vacuously true; both read as "na"
+    // rather than as a result.
+    const bool haveQ = s.quietCensus && s.quietPositions > 0;
+    const U64 qt = s.quietPositions;
+
+    std::fprintf(f, "%s,%d,%d,%d,%s,%s,%llu,", cfg.c_str(), s.n, s.w, s.b,
+                 capPieceName(pw), capPieceName(pb), (unsigned long long)s.positions);
+    if (s.quietCensus) std::fprintf(f, "%llu,", (unsigned long long)qt);
+    else               std::fprintf(f, "na,");
+    std::fprintf(f, "%d,%d,", awStm ? 1 : 0, awWhite ? 1 : 0);
+    if (haveQ) std::fprintf(f, "%d,%d,", qAwStm ? 1 : 0, qAwWhite ? 1 : 0);
+    else       std::fprintf(f, "na,na,");
+    std::fprintf(f, "%d,%d,", s.deepestWhite, s.deepestBlack);
+    std::fprintf(f, "%d,", s.deepestWhiteQuiet);
+    if (s.quietCensus) std::fprintf(f, "%d,", s.deepestBlackQuiet);
+    else               std::fprintf(f, "na,");
+    std::fprintf(f, "%llu,%llu,%llu,%llu,%llu,%llu,",
+                 (unsigned long long)s.wWin, (unsigned long long)s.wDraw,
+                 (unsigned long long)s.wLoss, (unsigned long long)s.bWin,
+                 (unsigned long long)s.bDraw, (unsigned long long)s.bLoss);
+    std::fprintf(f, "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,",
+                 pct(s.wWin, s.positions), pct(s.wDraw, s.positions), pct(s.wLoss, s.positions),
+                 pct(s.bWin, s.positions), pct(s.bDraw, s.positions), pct(s.bLoss, s.positions));
+    if (s.quietCensus) {
+        std::fprintf(f, "%llu,%llu,%llu,%llu,%llu,%llu,",
+                     (unsigned long long)s.qwWin, (unsigned long long)s.qwDraw,
+                     (unsigned long long)s.qwLoss, (unsigned long long)s.qbWin,
+                     (unsigned long long)s.qbDraw, (unsigned long long)s.qbLoss);
+        std::fprintf(f, "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,",
+                     pct(s.qwWin, qt), pct(s.qwDraw, qt), pct(s.qwLoss, qt),
+                     pct(s.qbWin, qt), pct(s.qbDraw, qt), pct(s.qbLoss, qt));
+    } else {
+        std::fprintf(f, "na,na,na,na,na,na,na,na,na,na,na,na,");
+    }
+    // The placements themselves, spelled the way the explorer's `pos` query
+    // parameter wants them, so a row can be turned into a link without the
+    // reader knowing anything about how squares are named.  Quoted, because
+    // the spelling has commas in it.
+    auto place = [&](const std::vector<Sq>& p, int d) {
+        if (!d || (int)p.size() < s.w + s.b) { std::fprintf(f, "\"\""); return; }
+        std::string out;
+        for (int i = 0; i < s.w; ++i) {
+            if (!out.empty()) out += ',';
+            out += 'w'; out += capPieceLetter(pw); out += tk.square(p[i]);
+        }
+        for (int i = 0; i < s.b; ++i) {
+            out += ',';
+            out += 'b'; out += capPieceLetter(pb); out += tk.square(p[s.w + i]);
+        }
+        std::fprintf(f, "\"%s\"", out.c_str());
+    };
+    place(s.posWhite, s.deepestWhite);
+    std::fprintf(f, ",");
+    place(s.posWhiteQuiet, s.deepestWhiteQuiet);
+    std::fprintf(f, "\n");
+    std::fclose(f);
+}
+
 int cmdKings(int argc, char** argv, bool rooks = false) {
     int pw = rooks ? CP_ROOK : CP_KING, pb = rooks ? CP_ROOK : CP_KING;
     int lo = 3, hi = 0, W = rooks ? 2 : 3, B = rooks ? 1 : 2, cap = 400;
@@ -2287,6 +2549,18 @@ int cmdKings(int argc, char** argv, bool rooks = false) {
     std::string probe;
     std::string tbDir;                 // a directory of .tb files, or empty
     bool tbVerify = false;
+    // The quiet census walks every placement through the move generator twice,
+    // which the ordinary census does not, so it is asked for rather than
+    // assumed.  Writing the CSV implies it: the file has columns for the quiet
+    // figures and blank ones would be worse than the cost of filling them.
+    bool qstats = false;
+    // --stats-csv normally implies the quiet pass, because blank quiet columns
+    // are worse than the cost of filling them.  --no-quiet-stats takes that
+    // back for material where the quiet split is not worth its price: the pass
+    // costs about four times the census and is proportional to table size
+    // rather than depth, so on shallow tables it is nearly all of the run.
+    bool noQstats = false;
+    std::string csvPath;
     for (int i = 0; i < argc; ++i) {
         std::string k = argv[i];
         auto val = [&]() { return (i + 1 < argc) ? std::string(argv[++i]) : std::string(); };
@@ -2304,6 +2578,9 @@ int cmdKings(int argc, char** argv, bool rooks = false) {
         else if (k == "--progress") progress = true;
         else if (k == "--probe")    probe = val();
         else if (k == "--quiet")    quietCensus = true;
+        else if (k == "--quiet-stats") qstats = true;
+        else if (k == "--no-quiet-stats") noQstats = true;
+        else if (k == "--stats-csv")   csvPath = val();
         else if (k == "--rook" || k == "--rooks") { pw = pb = CP_ROOK; }
         else if (k == "--wp" || k == "--white-piece") {
             bool ok; pw = capPieceParse(val(), ok);
@@ -2342,8 +2619,17 @@ int cmdKings(int argc, char** argv, bool rooks = false) {
         TableKings t(n, W, B, pw, pb);
         if (!tbDir.empty()) t.store(tbDir, tbVerify);
         t.generate(gThreads, progress);
-        t.census(gThreads, verify);
+        t.census(gThreads, verify, !noQstats && (qstats || !csvPath.empty()));
         const KingsStats& s = t.stats();
+        if (!csvPath.empty()) {
+            // Every table the run touched is a configuration in its own right,
+            // the conversions included, so each gets its own row -- in build
+            // order, smallest material first.
+            for (int w = 1; w <= W; ++w)
+                for (int b = 1; b <= B; ++b)
+                    if (w != W || b != B) statsCsvRow(csvPath, pw, pb, t.subStats(w, b), t);
+            statsCsvRow(csvPath, pw, pb, s, t);
+        }
 
         std::string checks;
         if (verify) checks += s.mismatches ? "BELLMAN FAILED " : "bellman ok ";
@@ -2684,6 +2970,771 @@ std::string plyText(const Geometry& g, const Material& m, const Pos& before,
 
 } // namespace
 
+// A shared-solver row, in the schema the kings and mixed collectors share.
+// Black has a bare king in every endgame this solver takes, so Black never
+// wins: the white-to-move row is win-or-draw and the black-to-move row is
+// White-wins-or-draw, which is why the two "loss" columns are always zero.
+// white_piece reads "shared" to mark the family, the way a "+" marks a mixed
+// row; the config carries the endgame name and its rule set.
+static void statsCsvRowShared(const std::string& path, const Table& t, bool capture) {
+    bool fresh = true;
+    if (std::FILE* f = std::fopen(path.c_str(), "rb")) {
+        std::fseek(f, 0, SEEK_END); fresh = std::ftell(f) == 0; std::fclose(f);
+    }
+    std::FILE* f = std::fopen(path.c_str(), "ab");
+    if (!f) { std::fprintf(stderr, "gen: cannot append to %s\n", path.c_str()); return; }
+    if (fresh)
+        std::fprintf(f,
+            "config,n,w,b,white_piece,black_piece,positions,quiet_positions,"
+            "always_win_stm,always_win_white,quiet_always_win_stm,quiet_always_win_white,"
+            "deepest_white,deepest_black,deepest_white_quiet,deepest_black_quiet,"
+            "wtm_win,wtm_draw,wtm_loss,btm_win,btm_draw,btm_loss,"
+            "wtm_win_pct,wtm_draw_pct,wtm_loss_pct,btm_win_pct,btm_draw_pct,btm_loss_pct,"
+            "q_wtm_win,q_wtm_draw,q_wtm_loss,q_btm_win,q_btm_draw,q_btm_loss,"
+            "q_wtm_win_pct,q_wtm_draw_pct,q_wtm_loss_pct,"
+            "q_btm_win_pct,q_btm_draw_pct,q_btm_loss_pct,"
+            "deepest_white_pos,deepest_white_quiet_pos\n");
+
+    const Stats& st = t.st;
+    const std::string cfg = std::string(t.mat.name()) + (capture ? "-capture" : "");
+    const U64 P = st.fwLive, Pb = st.fbLive;
+    auto pct = [](U64 x, U64 tot) { return tot ? 100.0 * (double)x / (double)tot : 0.0; };
+    // White to move: wins are fwWin, the rest draws.  Black to move: fbLoss is
+    // Black lost, i.e. White wins.
+    const bool awWhite = st.fwDraw == 0 && st.fbDraw == 0;
+    const bool awStm   = st.fwDraw == 0 && st.fbLoss == 0;   // Black never wins here
+    const bool haveQ   = st.quietCensus && st.fQuiet > 0;
+    const bool qAwWhite = st.fqwDraw == 0 && st.fqbDraw == 0;
+    const bool qAwStm   = st.fqwDraw == 0 && st.fqbLoss == 0;
+
+    std::fprintf(f, "%s,%d,%d,1,shared,king,%llu,", cfg.c_str(), t.n, t.mat.np + 1,
+                 (unsigned long long)P);
+    if (st.quietCensus) std::fprintf(f, "%llu,", (unsigned long long)st.fQuiet);
+    else                std::fprintf(f, "na,");
+    std::fprintf(f, "%d,%d,", awStm ? 1 : 0, awWhite ? 1 : 0);
+    if (haveQ) std::fprintf(f, "%d,%d,", qAwStm ? 1 : 0, qAwWhite ? 1 : 0);
+    else       std::fprintf(f, "na,na,");
+    std::fprintf(f, "%u,0,", st.maxPly);
+    if (st.quietCensus) std::fprintf(f, "%u,na,", st.maxPlyQuiet);
+    else                std::fprintf(f, "na,na,");
+    std::fprintf(f, "%llu,%llu,0,%llu,%llu,0,",
+                 (unsigned long long)st.fwWin, (unsigned long long)st.fwDraw,
+                 (unsigned long long)st.fbLoss, (unsigned long long)st.fbDraw);
+    std::fprintf(f, "%.6f,%.6f,0.000000,%.6f,%.6f,0.000000,",
+                 pct(st.fwWin, P), pct(st.fwDraw, P), pct(st.fbLoss, Pb), pct(st.fbDraw, Pb));
+    if (st.quietCensus)
+        std::fprintf(f, "%llu,%llu,0,%llu,%llu,0,%.6f,%.6f,0.000000,%.6f,%.6f,0.000000,",
+                     (unsigned long long)st.fqwWin, (unsigned long long)st.fqwDraw,
+                     (unsigned long long)st.fqbLoss, (unsigned long long)st.fqbDraw,
+                     pct(st.fqwWin, st.fQuiet), pct(st.fqwDraw, st.fQuiet),
+                     pct(st.fqbLoss, st.fQuiet), pct(st.fqbDraw, st.fQuiet));
+    else
+        std::fprintf(f, "na,na,na,na,na,na,na,na,na,na,na,na,");
+    auto place = [&](const Pos& q, U32 d) {
+        if (!d) { std::fprintf(f, "\"\""); return; }
+        std::string o = "wK" + t.geo.name(q.wk);
+        for (int i = 0; i < t.mat.np; ++i) {
+            o += ",w"; o += t.mat.letter(i); o += t.geo.name(q.wp[i]);
+        }
+        o += ",bK" + t.geo.name(q.bk);
+        std::fprintf(f, "\"%s\"", o.c_str());
+    };
+    place(st.longest, st.maxPly);
+    std::fprintf(f, ",");
+    if (st.quietCensus) place(st.longestQuiet, st.maxPlyQuiet); else std::fprintf(f, "\"\"");
+    std::fprintf(f, "\n");
+    std::fclose(f);
+}
+
+
+
+// ---------------------------------------------------------------------------
+// `general`: solve an arbitrary material.  See src/general.hpp.
+//
+//   egtb general --white KQ --black KN -n 5 [--mate] [--verify] [--brute]
+//
+// --mate picks the ordinary rules (one king a side, checkmate to win, stalemate
+// a draw); the default is capture rules.  A side written without a king plays
+// the kingless variant, where it is beaten when its last man goes -- which is
+// a different game from a royal side that has lost its king, and is why the
+// two are distinguished in the material rather than read off the position.
+static int cmdGeneral(int argc, char** argv) {
+    std::string wl, bl, storeDir;
+    int n = 0, threads = (int)std::thread::hardware_concurrency();
+    bool mate = false, verify = false, brute = false, quiet = false;
+    for (int i = 0; i < argc; ++i) {
+        const std::string a = argv[i];
+        auto val = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
+        if      (a == "--white" || a == "-w") wl = val();
+        else if (a == "--black" || a == "-b") bl = val();
+        else if (a == "-n")                   n = std::atoi(val().c_str());
+        else if (a == "--threads")            threads = std::atoi(val().c_str());
+        else if (a == "--mate")               mate = true;
+        else if (a == "--capture")            mate = false;
+        else if (a == "--verify")             verify = true;
+        else if (a == "--brute")              brute = true;
+        else if (a == "--quiet")              quiet = true;
+        else if (a == "--tables" || a == "--store") storeDir = val();
+        else if (a == "--d4")                 kqk::gGenD4 = true;
+        else if (a == "--plain")              kqk::gGenD4 = false;
+    }
+    kqk::GenMat m;
+    if (wl.empty() || bl.empty() || !kqk::genParseMen(wl, m.w) || !kqk::genParseMen(bl, m.b)) {
+        std::fprintf(stderr, "error: --white LETTERS --black LETTERS are required "
+                             "(letters from KQRBN)\n");
+        return 1;
+    }
+    if (n < 3) { std::fprintf(stderr, "error: -n N with N >= 3 is required\n"); return 1; }
+    m.capture = !mate;
+    m.royalW = kqk::GenMat::kings(m.w) > 0;
+    m.royalB = kqk::GenMat::kings(m.b) > 0;
+    m.sort();
+    if (mate && (kqk::GenMat::kings(m.w) != 1 || kqk::GenMat::kings(m.b) != 1)) {
+        std::fprintf(stderr, "error: the ordinary rules need exactly one king a side; "
+                             "use the capture rules for anything else\n");
+        return 1;
+    }
+    if (!m.playable()) {
+        std::fprintf(stderr, "error: %s is a finished game, not a position\n", m.name().c_str());
+        return 1;
+    }
+    const int cap = kqk::TableGen::maxMenFor(n);
+    if (m.men() > cap) {
+        std::fprintf(stderr, "error: %d men on %dx%d needs an index this solver does not "
+                             "reduce; it fits %d men on this board\n", m.men(), n, n, cap);
+        return 1;
+    }
+    kqk::GenCache cache;
+    const auto t0 = std::chrono::steady_clock::now();
+    const kqk::TableGen* t = kqk::genSolve(m, n, threads, cache, !quiet, storeDir);
+    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    if (!t) { std::fprintf(stderr, "error: nothing to solve\n"); return 1; }
+    std::printf("%s  %dx%d  (%s rules)\n", m.name().c_str(), n, n,
+                mate ? "ordinary" : "capture");
+    std::printf("  slots per side   %llu%s\n", (unsigned long long)t->slots(),
+                t->d4 ? "  (D4-reduced)" : "");
+    std::printf("  tables built     %zu  (this one and what it converts into)\n", cache.size());
+    std::printf("  deepest          %d plies\n", t->maxAbs ? t->maxAbs - 1 : 0);
+    std::printf("  solved in        %.2fs\n", secs);
+    int rc = 0;
+    if (verify) {
+        const U64 bad = kqk::genVerify(*t, true);
+        std::printf("%s\n", bad ? "VERIFY FAILED"
+                                : "verification: 0 mismatches -- table is consistent");
+        if (bad) rc = 1;
+    }
+    if (brute) {
+        const U64 bad = kqk::genBruteForce(*t, threads, true);
+        std::printf("%s\n", bad ? "BRUTE FORCE FAILED"
+                                : "0 disagreements -- the sweep and the frontier agree exactly");
+        if (bad) rc = 1;
+    }
+    return rc;
+}
+
+
+
+// One white man and one black man, each beside a king: kqkr.cpp's family.  Its
+// values are White-relative and already carry the +1 offset -- "v > 0 White
+// mates in v-1 plies" -- so the general solver's mover-relative value is the
+// same number with the sign flipped when Black is to move.
+static int genCheckArmed(Endgame eg, int n, bool capture, bool quiet) {
+    TableKQKR kt(n, eg);
+    kt.generate(gThreads, false);
+    const Piece wpp = whitePieceOf(eg), bpp = blackPieceOf(eg);
+    auto toCap = [](Piece p) {
+        return p == Piece::Queen  ? CP_QUEEN : p == Piece::Rook   ? CP_ROOK
+             : p == Piece::Bishop ? CP_BISHOP : CP_KNIGHT;
+    };
+    kqk::GenMat gm;
+    gm.w.push_back(CP_KING); gm.w.push_back((U8)toCap(wpp));
+    gm.b.push_back(CP_KING); gm.b.push_back((U8)toCap(bpp));
+    gm.capture = capture;
+    gm.royalW = gm.royalB = true;
+    gm.sort();
+    kqk::GenCache cache;
+    const kqk::TableGen* gt = kqk::genSolve(gm, n, gThreads, cache, !quiet);
+    if (!gt) { std::fprintf(stderr, "error: the general solver refused\n"); return 1; }
+
+    const int nsq = n * n;
+    U64 compared = 0, bad = 0, both = 0, unmodelled = 0, extra = 0;
+    Pos pp;
+    Sq gsq[4];
+    for (pp.wk = 0; pp.wk < nsq; ++pp.wk)
+      for (pp.bk = 0; pp.bk < nsq; ++pp.bk)
+        for (Sq a = 0; a < nsq; ++a)
+          for (Sq b = 0; b < nsq; ++b) {
+            pp.wp[0] = a; pp.wp[1] = b;
+            gsq[0] = pp.wk; gsq[1] = a; gsq[2] = pp.bk; gsq[3] = b;
+            for (int stm = 0; stm < 2; ++stm) {
+                const int16_t kv = kt.valueAt(pp, stm == 0);
+                U64 gsl; if (!gt->rank(gsq, gsl)) continue;
+                        const int16_t gv = gt->v[stm][(size_t)gsl];
+                const bool kd = (kv == VK_DEAD || kv == VK_UNKNOWN);
+                const bool gd = (gv == VC_DEAD);
+                if (kd && gd)  { ++both; continue; }
+                if (kd && !gd) { ++unmodelled; continue; }
+                if (!kd && gd) { ++extra; continue; }
+                const int want = stm == 0 ? (int)kv : -(int)kv;
+                ++compared;
+                bool differs;
+                if (capture) {
+                    const int x = want < 0 ? -1 : want > 0 ? 1 : 0;
+                    const int y = gv   < 0 ? -1 : gv   > 0 ? 1 : 0;
+                    differs = x != y;
+                } else differs = want != (int)gv;
+                if (differs) {
+                    if (bad < 10)
+                        std::fprintf(stderr, "  ARMED wk=%d bk=%d w=%d b=%d stm=%d: "
+                                     "kqkr=%d -> %d, general=%d\n",
+                                     (int)pp.wk, (int)pp.bk, (int)a, (int)b, stm,
+                                     (int)kv, want, (int)gv);
+                    ++bad;
+                }
+            }
+          }
+    std::printf("%s %dx%d (%s rules): %llu compared, %llu both-illegal, "
+                "%llu only-general, %llu only-kqkr, %llu disagreements\n",
+                Material::of(eg).name(), n, n, capture ? "capture" : "ordinary",
+                (unsigned long long)compared, (unsigned long long)both,
+                (unsigned long long)unmodelled, (unsigned long long)extra,
+                (unsigned long long)bad);
+    std::printf("%s\n", bad ? "GENCHECK FAILED" : "0 disagreements");
+    return bad ? 1 : 0;
+}
+
+
+// K + Q against two black kings, kqkkcap.cpp: the file that states the rule
+// this is all measured against.  Its values are mover-relative plies, so the
+// general solver's are the same number moved one away from zero.
+static int genCheckKqkk(int n, bool quiet) {
+    TableKQKKCap kt(n);
+    kt.generate(gThreads, false);
+    kqk::GenMat gm;
+    gm.w.push_back(CP_KING); gm.w.push_back(CP_QUEEN);
+    gm.b.push_back(CP_KING); gm.b.push_back(CP_KING);
+    gm.capture = true; gm.royalW = gm.royalB = true; gm.sort();
+    kqk::GenCache cache;
+    const kqk::TableGen* gt = kqk::genSolve(gm, n, gThreads, cache, !quiet);
+    if (!gt) { std::fprintf(stderr, "error: the general solver refused\n"); return 1; }
+    const int nsq = n * n;
+    U64 compared = 0, bad = 0, both = 0, unmodelled = 0, extra = 0;
+    PosKK pk;
+    Sq gsq[4];
+    for (pk.wk = 0; pk.wk < nsq; ++pk.wk)
+      for (pk.wq = 0; pk.wq < nsq; ++pk.wq)
+        for (pk.bk1 = 0; pk.bk1 < nsq; ++pk.bk1)
+          for (pk.bk2 = 0; pk.bk2 < nsq; ++pk.bk2) {
+            gsq[0] = pk.wk; gsq[1] = pk.wq; gsq[2] = pk.bk1; gsq[3] = pk.bk2;
+            for (int stm = 0; stm < 2; ++stm) {
+                const int16_t kv = kt.valueAt(pk, stm == 0);
+                U64 gsl; if (!gt->rank(gsq, gsl)) continue;
+                        const int16_t gv = gt->v[stm][(size_t)gsl];
+                const bool kd = (kv == VC_DEAD || kv == VC_UNKNOWN);
+                const bool gd = (gv == VC_DEAD);
+                if (kd && gd)  { ++both; continue; }
+                if (kd && !gd) { ++unmodelled; continue; }
+                if (!kd && gd) { ++extra; continue; }
+                const int want = kv == 0 ? 0 : (kv > 0 ? kv + 1 : kv - 1);
+                ++compared;
+                if (want != (int)gv) {
+                    if (bad < 10)
+                        std::fprintf(stderr, "  KQKK wk=%d wq=%d b1=%d b2=%d stm=%d: "
+                                     "kqkkcap=%d -> %d, general=%d\n",
+                                     (int)pk.wk, (int)pk.wq, (int)pk.bk1, (int)pk.bk2,
+                                     stm, (int)kv, want, (int)gv);
+                    ++bad;
+                }
+            }
+          }
+    std::printf("KQKK %dx%d (capture rules): %llu compared, %llu both-illegal, "
+                "%llu only-general, %llu only-kqkkcap, %llu disagreements\n",
+                n, n, (unsigned long long)compared, (unsigned long long)both,
+                (unsigned long long)unmodelled, (unsigned long long)extra,
+                (unsigned long long)bad);
+    std::printf("%s\n", bad ? "GENCHECK FAILED" : "0 disagreements");
+    return bad ? 1 : 0;
+}
+
+// ---------------------------------------------------------------------------
+// `gencheck`: the general solver against a solver that already exists.
+//
+// This is the check that matters for src/general.cpp.  Its own verifier and
+// its own sweep share its move generator, so between them they can only catch
+// a mistake in the induction.  A shared-solver endgame answers the same
+// question through a different index, a different move generator, a different
+// value encoding and a different induction, so agreeing with it entry by entry
+// is evidence of a different kind.  The two are compared over every placement,
+// not every canonical slot, because that is the only thing they both have.
+static int cmdGenCheck(int argc, char** argv) {
+    int n = 0;
+    bool capture = false, quiet = false;
+    Endgame eg = Endgame::KQK;
+    for (int i = 0; i < argc; ++i) {
+        const std::string a = argv[i];
+        auto val = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
+        if      (a == "-n")          n = std::atoi(val().c_str());
+        else if (a == "--endgame")   { if (!parseEndgame(val(), eg)) {
+                                          std::fprintf(stderr, "error: unknown endgame\n");
+                                          return 1; } }
+        else if (a == "--capture")   capture = true;
+        else if (a == "--quiet")     quiet = true;
+    }
+    if (n < 3) { std::fprintf(stderr, "error: -n N with N >= 3 is required\n"); return 1; }
+    Material sm = Material::of(eg);
+    if (blackArmed(eg)) return genCheckArmed(eg, n, capture, quiet);
+    // The shared solver's answer.
+    Table st(n, eg);
+    st.stalemateLoss = capture;
+    auto keep = attachSub(st, gThreads, false);
+    st.generate(gThreads, false);
+
+    // The general solver's answer for the same men.
+    kqk::GenMat gm;
+    gm.w.push_back(CP_KING);
+    for (int i = 0; i < sm.np; ++i)
+        gm.w.push_back(sm.piece[i] == Piece::Queen  ? CP_QUEEN
+                     : sm.piece[i] == Piece::Rook   ? CP_ROOK
+                     : sm.piece[i] == Piece::Bishop ? CP_BISHOP : CP_KNIGHT);
+    gm.b.push_back(CP_KING);
+    gm.capture = capture;
+    gm.royalW = gm.royalB = true;
+    gm.sort();
+    kqk::GenCache cache;
+    const kqk::TableGen* gt = kqk::genSolve(gm, n, gThreads, cache, !quiet);
+    if (!gt) { std::fprintf(stderr, "error: the general solver refused\n"); return 1; }
+
+    // The two name their men in different orders, and it is not a detail: the
+    // shared solver lists a pair of alike men first (KBNNK is N,N,B) while the
+    // general material sorts by strength (B,N,N).  Match them on piece type,
+    // first unused wins, or the comparison reads two different positions.
+    std::vector<int> src(gt->mat.w.size(), -1);        // -1 means the king
+    {
+        std::vector<bool> used((size_t)sm.np, false);
+        for (size_t j = 0; j < gt->mat.w.size(); ++j) {
+            if (gt->mat.w[j] == CP_KING) continue;
+            for (int i = 0; i < sm.np; ++i) {
+                if (used[(size_t)i]) continue;
+                const int kind = sm.piece[i] == Piece::Queen  ? CP_QUEEN
+                               : sm.piece[i] == Piece::Rook   ? CP_ROOK
+                               : sm.piece[i] == Piece::Bishop ? CP_BISHOP : CP_KNIGHT;
+                if (kind == gt->mat.w[j]) { used[(size_t)i] = true; src[j] = i; break; }
+            }
+        }
+    }
+
+    const int nsq = n * n;
+    const int np = sm.np;
+    U64 compared = 0, bad = 0, skipped = 0, unmodelled = 0, extra = 0;
+    U64 deltaHist[8] = { 0, 0, 0, 0, 0, 0, 0, 0 }, deltaOther = 0;
+    Pos pp;
+    Sq gsq[6];
+    std::vector<int> c(np, 0);
+    // Every placement of the men, both sides to move.
+    for (pp.wk = 0; pp.wk < nsq; ++pp.wk)
+        for (pp.bk = 0; pp.bk < nsq; ++pp.bk) {
+            for (int i = 0; i < np; ++i) c[i] = 0;
+            for (;;) {
+                for (int i = 0; i < np; ++i) pp.wp[i] = (Sq)c[i];
+                for (size_t j = 0; j < gt->mat.w.size(); ++j)
+                    gsq[j] = src[j] < 0 ? pp.wk : pp.wp[src[j]];
+                gsq[gt->mat.w.size()] = pp.bk;
+                for (int stm = 0; stm < 2; ++stm) {
+                    const U8 sv = st.valueAt(pp, stm == 0);
+                    U64 gsl; if (!gt->rank(gsq, gsl)) continue;
+                        const int16_t gv = gt->v[stm][(size_t)gsl];
+                    // A placement one of them calls illegal and the other does
+                    // not is the interesting case, not something to skip past:
+                    // under capture rules a king may stand beside a king and
+                    // either may take the other, so a solver that rules those
+                    // placements out is not modelling the whole game.
+                    if (sv == V_DEAD && gv != VC_DEAD) { ++unmodelled; continue; }
+                    if (gv == VC_DEAD && sv != V_DEAD) { ++extra; continue; }
+                    if (sv == V_DEAD || gv == VC_DEAD) { ++skipped; continue; }
+                    // The shared solver counts plies to mate with White always
+                    // the winner; the general one signs the value and adds one.
+                    int want;
+                    if (sv == V_DRAW)      want = 0;
+                    else if (stm == 0)     want =  ((int)sv + 1);   // White to move, White wins
+                    else                   want = -((int)sv + 1);   // Black to move, Black loses
+                    ++compared;
+                    // Under capture rules the two model the SAME game with
+                    // different terminals: the shared solver stops when the
+                    // king is trapped and scores that as a loss, this one
+                    // plays on and takes it, so its depth is one or two plies
+                    // longer.  The verdict must still agree exactly, and that
+                    // is what is compared.
+                    bool differs;
+                    if (capture) {
+                        const int a = want < 0 ? -1 : want > 0 ? 1 : 0;
+                        const int b2 = gv   < 0 ? -1 : gv   > 0 ? 1 : 0;
+                        differs = a != b2;
+                        // How much deeper the general solver's count is, for
+                        // the decided entries.  If that gap is always the one
+                        // or two plies it takes to walk into the capture and
+                        // make it, then allowing a king to be taken changed
+                        // only where the count stops and not how either side
+                        // plays -- which is what decides whether the stored
+                        // tables need regenerating or merely extending.
+                        if (!differs && a != 0) {
+                            const int delta = (want < 0 ? -(want) : want);
+                            const int gd    = (gv   < 0 ? -(gv)   : gv);
+                            const int diff  = gd - delta;
+                            if (diff >= 0 && diff < 8) ++deltaHist[diff];
+                            else ++deltaOther;
+                        }
+                    } else differs = want != (int)gv;
+                    if (differs) {
+                        if (bad < 12)
+                            std::fprintf(stderr,
+                                "  GENCHECK wk=%d bk=%d wp0=%d stm=%d: shared=%d -> %d, general=%d\n",
+                                (int)pp.wk, (int)pp.bk, (int)pp.wp[0], stm, (int)sv, want, (int)gv);
+                        ++bad;
+                    }
+                }
+                int i = np - 1;
+                for (; i >= 0; --i) { if (++c[i] < nsq) break; c[i] = 0; }
+                if (i < 0) break;
+            }
+        }
+    std::printf("%s %dx%d (%s rules): %llu compared, %llu both-illegal, "
+                "%llu only-general, %llu only-shared, %llu disagreements\n",
+                sm.name(), n, n, capture ? "capture" : "ordinary",
+                (unsigned long long)compared, (unsigned long long)skipped,
+                (unsigned long long)unmodelled, (unsigned long long)extra,
+                (unsigned long long)bad);
+    if (capture) {
+        std::printf("  depth gap (general minus shared), decided entries:");
+        for (int i = 0; i < 8; ++i) if (deltaHist[i])
+            std::printf("  +%d:%llu", i, (unsigned long long)deltaHist[i]);
+        if (deltaOther) std::printf("  other:%llu", (unsigned long long)deltaOther);
+        std::printf("\n");
+    }
+    std::printf("%s\n", bad ? "GENCHECK FAILED"
+                            : (capture ? "0 disagreements -- the general solver agrees on every verdict"
+                                       : "0 disagreements -- the general solver matches the shared one"));
+    return bad ? 1 : 0;
+}
+
+
+// ---------------------------------------------------------------------------
+// `gencap`: the general solver against the two capture-rules solvers already
+// here, kings.cpp and mixed.cpp.
+//
+// These are the right comparison for capture rules, because they model the
+// same game the general solver does: a king is an ordinary man, the win is
+// taking the opponent's last king, and a side walled in by its own men is
+// stalemated and drawn (kings.cpp, rules 1-4).  The SHARED solver's capture
+// reading is a different encoding of the same game -- chess legality with a
+// chess stalemate scored as a loss -- which gives the same win/draw/loss
+// verdict but a depth one or two plies shorter, because it stops at the point
+// where the king is trapped rather than playing on to take it.  So the shared
+// solver is compared on verdict only, by `gencheck --capture`, and these two
+// on the value itself.
+static int cmdGenCap(int argc, char** argv) {
+    int n = 0, wk = 0, bk = 0;
+    int p0 = -1, p1 = -1, pb = -1;
+    int wkind = CP_KING, bkind = CP_KING;   // kings.cpp's piece codes
+    bool quiet = false;
+    for (int i = 0; i < argc; ++i) {
+        const std::string a = argv[i];
+        auto val = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
+        if      (a == "-n")        n = std::atoi(val().c_str());
+        else if (a == "--kings")   { wk = std::atoi(val().c_str()); bk = std::atoi(val().c_str()); }
+        else if (a == "--wkind")   { bool ok = true; wkind = capPieceParse(val(), ok); }
+        else if (a == "--bkind")   { bool ok = true; bkind = capPieceParse(val(), ok); }
+        else if (a == "--w1")      { bool ok = true; p0 = capPieceParse(val(), ok); }
+        else if (a == "--w2")      { bool ok = true; p1 = capPieceParse(val(), ok); }
+        else if (a == "--bp")      { bool ok = true; pb = capPieceParse(val(), ok); }
+        else if (a == "--quiet")   quiet = true;
+    }
+    if (n < 3) { std::fprintf(stderr, "error: -n N with N >= 3 is required\n"); return 1; }
+    const int nsq = n * n;
+    U64 compared = 0, bad = 0;
+
+    if (wk > 0 && bk > 0) {
+        TableKings kt(n, wk, bk, wkind, bkind);
+        kt.generate(gThreads, false);
+        kqk::GenMat gm;
+        for (int i = 0; i < wk; ++i) gm.w.push_back((U8)wkind);
+        for (int i = 0; i < bk; ++i) gm.b.push_back((U8)bkind);
+        gm.capture = true;
+        // Each side is one kind of man here, so "beaten when the last king
+        // goes" and "beaten when the last man goes" coincide either way -- but
+        // that is the thing being tested, so it is derived, not assumed.
+        gm.royalW = kqk::GenMat::kings(gm.w) > 0;
+        gm.royalB = kqk::GenMat::kings(gm.b) > 0;
+        gm.sort();
+        kqk::GenCache cache;
+        const kqk::TableGen* gt = kqk::genSolve(gm, n, gThreads, cache, !quiet);
+        if (!gt) { std::fprintf(stderr, "error: the general solver refused\n"); return 1; }
+        std::vector<Sq> W((size_t)wk), B((size_t)bk);
+        Sq gsq[6];
+        const int k = wk + bk;
+        std::vector<int> c((size_t)k, 0);
+        for (;;) {
+            bool distinct = true;
+            for (int i = 0; i < k && distinct; ++i)
+                for (int j = i + 1; j < k; ++j) if (c[i] == c[j]) { distinct = false; break; }
+            if (distinct) {
+                for (int i = 0; i < wk; ++i) W[(size_t)i] = (Sq)c[i];
+                for (int i = 0; i < bk; ++i) B[(size_t)i] = (Sq)c[wk + i];
+                // kings.cpp wants each side sorted; the general index does not
+                // care, and the two agree on the position either way.
+                std::vector<Sq> Ws = W, Bs = B;
+                std::sort(Ws.begin(), Ws.end());
+                std::sort(Bs.begin(), Bs.end());
+                for (int i = 0; i < k; ++i) gsq[i] = (Sq)c[i];
+                for (int stm = 0; stm < 2; ++stm) {
+                    const int16_t kv = kt.probe(Ws, Bs, stm == 0);
+                    U64 gsl; if (!gt->rank(gsq, gsl)) continue;
+                        const int16_t gv = gt->v[stm][(size_t)gsl];
+                    if (gv == VC_DEAD) continue;
+                    const int want = kv == 0 ? 0 : (kv > 0 ? kv + 1 : kv - 1);
+                    ++compared;
+                    if (want != (int)gv) {
+                        if (bad < 10)
+                            std::fprintf(stderr, "  GENCAP kings stm=%d: kings=%d -> %d, general=%d\n",
+                                         stm, (int)kv, want, (int)gv);
+                        ++bad;
+                    }
+                }
+            }
+            int i = k - 1;
+            for (; i >= 0; --i) { if (++c[(size_t)i] < nsq) break; c[(size_t)i] = 0; }
+            if (i < 0) break;
+        }
+        std::printf("%d %s vs %d %s, %dx%d: %llu compared, %llu disagreements\n",
+                    wk, capPieceName(wkind), bk, capPieceName(bkind), n, n,
+                    (unsigned long long)compared, (unsigned long long)bad);
+    } else if (p0 >= 0 && p1 >= 0 && pb >= 0) {
+        TableMixed mt(n, p0, p1, pb);
+        mt.generate(gThreads);
+        kqk::GenMat gm;
+        gm.w.push_back((U8)p0); gm.w.push_back((U8)p1);
+        gm.b.push_back((U8)pb);
+        gm.capture = true;
+        gm.royalW = kqk::GenMat::kings(gm.w) > 0;
+        gm.royalB = kqk::GenMat::kings(gm.b) > 0;
+        // mixed.cpp keeps its two white men in the order given, so the general
+        // material must not be re-sorted out from under the comparison.
+        const bool swapped = kqk::genRank(p0) > kqk::genRank(p1);
+        gm.sort();
+        kqk::GenCache cache;
+        const kqk::TableGen* gt = kqk::genSolve(gm, n, gThreads, cache, !quiet);
+        if (!gt) { std::fprintf(stderr, "error: the general solver refused\n"); return 1; }
+        Sq gsq[6];
+        for (int a = 0; a < nsq; ++a)
+            for (int b = 0; b < nsq; ++b)
+                for (int c2 = 0; c2 < nsq; ++c2) {
+                    if (a == b || a == c2 || b == c2) continue;
+                    gsq[0] = (Sq)(swapped ? b : a);
+                    gsq[1] = (Sq)(swapped ? a : b);
+                    gsq[2] = (Sq)c2;
+                    for (int stm = 0; stm < 2; ++stm) {
+                        const int16_t mv = mt.probe((Sq)a, (Sq)b, (Sq)c2, stm == 0);
+                        U64 gsl; if (!gt->rank(gsq, gsl)) continue;
+                        const int16_t gv = gt->v[stm][(size_t)gsl];
+                        if (gv == VC_DEAD) continue;
+                        const int want = mv == 0 ? 0 : (mv > 0 ? mv + 1 : mv - 1);
+                        ++compared;
+                        if (want != (int)gv) {
+                            if (bad < 10)
+                                std::fprintf(stderr,
+                                    "  GENCAP mixed w0=%d w1=%d b=%d stm=%d: mixed=%d -> %d, general=%d\n",
+                                    a, b, c2, stm, (int)mv, want, (int)gv);
+                            ++bad;
+                        }
+                    }
+                }
+        std::printf("%c%c vs %c, %dx%d: %llu compared, %llu disagreements\n",
+                    capPieceLetter(p0), capPieceLetter(p1), capPieceLetter(pb),
+                    n, n, (unsigned long long)compared, (unsigned long long)bad);
+    } else {
+        std::fprintf(stderr, "error: --kings W B, or --w1 P --w2 P --bp P\n");
+        return 1;
+    }
+    std::printf("%s\n", bad ? "GENCAP FAILED"
+                            : "0 disagreements -- the general solver matches");
+    return bad ? 1 : 0;
+}
+
+
+// ---------------------------------------------------------------------------
+// `genidx`: the D4-reduced index, checked as a ranking before anything is
+// solved on it.  Three properties, each of which a wrong index breaks:
+//
+//   1. every canonical slot decodes to a placement that ranks back to itself;
+//   2. every placement ranks to a slot whose decode is in its ORBIT, so the
+//      ranking is constant on orbits and loses no position;
+//   3. the live slots number exactly the orbits, counted independently by
+//      canonicalising every placement and putting the results in a set.
+//
+// index.hpp records that a past bug came from two places disagreeing about
+// which slot is canonical, which is the sort of thing that produces plausible
+// tables rather than a crash.
+static int cmdGenIdx(int argc, char** argv) {
+    int n = 0, k = 0;
+    for (int i = 0; i < argc; ++i) {
+        const std::string a = argv[i];
+        auto val = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
+        if      (a == "-n")    n = std::atoi(val().c_str());
+        else if (a == "--men") k = std::atoi(val().c_str());
+    }
+    if (n < 3 || k < 2 || k > 5) {
+        std::fprintf(stderr, "error: -n N --men K (2 <= K <= 5)\n");
+        return 1;
+    }
+    Geometry g(n);
+    kqk::GenIndexD4 idx(g, k);
+    const int nsq = g.nsq;
+    U64 plain = 1;
+    for (int i = 0; i < k; ++i) plain *= (U64)nsq;
+
+    U64 roundTrip = 0, badRound = 0, badOrbit = 0, live = 0;
+    std::vector<Sq> sq((size_t)k), dec((size_t)k);
+    // 1 and 3: every canonical slot ranks back to itself.
+    for (U64 s = 0; s < idx.nslots; ++s) {
+        idx.decode(s, dec.data());
+        bool dup = false;
+        for (int i = 0; i < k && !dup; ++i)
+            for (int j = i + 1; j < k; ++j) if (dec[i] == dec[j]) { dup = true; break; }
+        if (dup) continue;
+        if (!idx.restCanonical(idx.pairIdOf(s), dec.data() + 2)) continue;
+        ++live;
+        U64 back;
+        if (!idx.slotOf(dec.data(), back) || back != s) { ++badRound; if (badRound < 4)
+            std::fprintf(stderr, "  slot %llu does not rank back to itself\n", (unsigned long long)s); }
+        else ++roundTrip;
+    }
+    // 2: every placement ranks into its own orbit, and orbit-mates agree.
+    std::vector<int> c((size_t)k, 0);
+    U64 checked = 0;
+    std::set<U64> orbits;
+    for (;;) {
+        bool dup = false;
+        for (int i = 0; i < k && !dup; ++i)
+            for (int j = i + 1; j < k; ++j) if (c[i] == c[j]) { dup = true; break; }
+        if (!dup) {
+            for (int i = 0; i < k; ++i) sq[(size_t)i] = (Sq)c[i];
+            U64 s0;
+            if (!idx.slotOf(sq.data(), s0)) { ++badOrbit; }
+            else {
+                orbits.insert(s0);
+                ++checked;
+                // every image of this placement must rank to the same slot
+                for (int sym = 1; sym < NSYM; ++sym) {
+                    std::vector<Sq> im((size_t)k);
+                    for (int i = 0; i < k; ++i) im[(size_t)i] = g.image(sym, sq[(size_t)i]);
+                    U64 s1;
+                    if (!idx.slotOf(im.data(), s1) || s1 != s0) {
+                        if (badOrbit < 4)
+                            std::fprintf(stderr, "  a placement and its image rank differently\n");
+                        ++badOrbit;
+                        break;
+                    }
+                }
+            }
+        }
+        int i = k - 1;
+        for (; i >= 0; --i) { if (++c[(size_t)i] < nsq) break; c[(size_t)i] = 0; }
+        if (i < 0) break;
+    }
+    std::printf("%dx%d, %d men: plain %llu slots, reduced %llu (%.2fx), live %llu\n",
+                n, n, k, (unsigned long long)plain, (unsigned long long)idx.nslots,
+                (double)plain / (double)idx.nslots, (unsigned long long)live);
+    std::printf("  round trip %llu ok, %llu bad | placements %llu, distinct slots %zu, orbit faults %llu\n",
+                (unsigned long long)roundTrip, (unsigned long long)badRound,
+                (unsigned long long)checked, orbits.size(), (unsigned long long)badOrbit);
+    const bool ok = badRound == 0 && badOrbit == 0 && orbits.size() == live;
+    std::printf("%s\n", ok ? "the ranking is a bijection on orbits"
+                           : "THE RANKING IS WRONG");
+    return ok ? 0 : 1;
+}
+
+
+// ---------------------------------------------------------------------------
+// `gend4`: the reduced ranking against the plain one, position by position.
+//
+// The two put the same values in different places, so the files cannot be
+// compared byte for byte the way every other change to this solver was.  What
+// can be compared is the answer to a position, and that is what this does: it
+// walks every placement, asks each table, and requires the two to agree.
+static int cmdGenD4(int argc, char** argv) {
+    std::string wl, bl;
+    int n = 0, threads = (int)std::thread::hardware_concurrency();
+    bool mate = false;
+    for (int i = 0; i < argc; ++i) {
+        const std::string a = argv[i];
+        auto val = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
+        if      (a == "--white" || a == "-w") wl = val();
+        else if (a == "--black" || a == "-b") bl = val();
+        else if (a == "-n")                   n = std::atoi(val().c_str());
+        else if (a == "--mate")               mate = true;
+    }
+    kqk::GenMat m;
+    if (wl.empty() || bl.empty() || !kqk::genParseMen(wl, m.w) || !kqk::genParseMen(bl, m.b) || n < 3) {
+        std::fprintf(stderr, "error: --white L --black L -n N\n");
+        return 1;
+    }
+    m.capture = !mate;
+    m.royalW = kqk::GenMat::kings(m.w) > 0;
+    m.royalB = kqk::GenMat::kings(m.b) > 0;
+    m.sort();
+
+    kqk::gGenD4 = false;
+    kqk::GenCache cp;
+    const kqk::TableGen* tp = kqk::genSolve(m, n, threads, cp, false);
+    kqk::gGenD4 = true;
+    kqk::GenCache cd;
+    const kqk::TableGen* td = kqk::genSolve(m, n, threads, cd, false);
+    kqk::gGenD4 = false;
+    if (!tp || !td) { std::fprintf(stderr, "error: could not solve\n"); return 1; }
+
+    const int nsq = n * n, k = m.men();
+    U64 cmp = 0, bad = 0, deadP = 0, deadD = 0;
+    std::vector<int> c((size_t)k, 0);
+    std::vector<Sq> sq((size_t)k);
+    for (;;) {
+        bool dup = false;
+        for (int i = 0; i < k && !dup; ++i)
+            for (int j = i + 1; j < k; ++j) if (c[i] == c[j]) { dup = true; break; }
+        if (!dup) {
+            for (int i = 0; i < k; ++i) sq[(size_t)i] = (Sq)c[i];
+            U64 sp, sd;
+            const bool okp = tp->rank(sq.data(), sp), okd = td->rank(sq.data(), sd);
+            if (okp && okd)
+                for (int stm = 0; stm < 2; ++stm) {
+                    const int16_t a = tp->v[stm][(size_t)sp], b = td->v[stm][(size_t)sd];
+                    const bool da = (a == VC_DEAD), db = (b == VC_DEAD);
+                    if (da != db) { ++bad; if (bad < 6)
+                        std::fprintf(stderr, "  one calls it a position and the other does not (stm %d)\n", stm);
+                        continue; }
+                    if (da) { ++deadP; ++deadD; continue; }
+                    ++cmp;
+                    if (a != b) {
+                        if (bad < 6) {
+                            std::fprintf(stderr, "  MISMATCH stm %d:", stm);
+                            for (int i = 0; i < k; ++i) std::fprintf(stderr, " %d", (int)sq[(size_t)i]);
+                            std::fprintf(stderr, "  plain=%d reduced=%d\n", (int)a, (int)b);
+                        }
+                        ++bad;
+                    }
+                }
+        }
+        int i = k - 1;
+        for (; i >= 0; --i) { if (++c[(size_t)i] < nsq) break; c[(size_t)i] = 0; }
+        if (i < 0) break;
+    }
+    std::printf("%s %dx%d: plain %llu slots, reduced %llu (%.2fx); %llu placements compared, %llu disagreements\n",
+                m.name().c_str(), n, n, (unsigned long long)tp->idx.nslots,
+                (unsigned long long)td->idx4.nslots,
+                (double)tp->idx.nslots / (double)td->idx4.nslots,
+                (unsigned long long)cmp, (unsigned long long)bad);
+    std::printf("%s\n", bad ? "THE REDUCED TABLE DISAGREES" : "0 disagreements -- the two rankings agree everywhere");
+    return bad ? 1 : 0;
+}
+
 int main(int argc, char** argv) {
     // Running as `krk` or `kbbk` picks that endgame by default; under the
     // binary's own name `egtb`, or as `kqk`, it stays KQK.  --endgame wins.
@@ -2704,6 +3755,7 @@ int main(int argc, char** argv) {
     char** rv = argv + 2;
 
     try {
+
         if (cmd == "gen") {
             Args a = parse(rest, rv, nullptr);
             if (refuseArmed()) return 1;
@@ -2736,6 +3788,19 @@ int main(int argc, char** argv) {
             if (!a.out.empty()) {
                 t.save(a.out, a.rle);
                 std::printf("wrote %s\n", a.out.c_str());
+            }
+            {
+                std::string csv;
+                bool noQ = false;
+                for (int i = 0; i < rest; ++i) {
+                    const std::string k = rv[i];
+                    if (k == "--stats-csv" && i + 1 < rest) csv = rv[i + 1];
+                    if (k == "--no-quiet-stats") noQ = true;
+                }
+                if (!csv.empty()) {
+                    t.computeStats(gThreads, !noQ);
+                    statsCsvRowShared(csv, t, gStaleLoss);
+                }
             }
             // --probe queries a position from the table just built, without
             // writing it out first.  Past about 10 GiB a table costs as much
@@ -2812,6 +3877,15 @@ int main(int argc, char** argv) {
             return 0;
         }
 
+        if (cmd == "general")    return cmdGeneral(rest, rv);
+        if (cmd == "gencheck")   return cmdGenCheck(rest, rv);
+        if (cmd == "gencap")     return cmdGenCap(rest, rv);
+        if (cmd == "genidx")     return cmdGenIdx(rest, rv);
+        if (cmd == "gend4")      return cmdGenD4(rest, rv);
+        if (cmd == "genkqkk")    { int nn = 0; for (int i = 0; i < rest; ++i)
+                                     if (std::string(rv[i]) == "-n" && i + 1 < rest)
+                                         nn = std::atoi(rv[i + 1]);
+                                   return genCheckKqkk(nn, true); }
         if (cmd == "selftest")   return cmdSelftest(rest, rv);
         if (cmd == "sizes")      { parse(rest, rv, nullptr); return cmdSizes(rest, rv); }
         if (cmd == "bruteforce") {
@@ -2827,6 +3901,7 @@ int main(int argc, char** argv) {
         if (cmd == "kings")      return cmdKings(rest, rv);
         if (cmd == "rooks")      return cmdKings(rest, rv, true);
         if (cmd == "mixed")      return cmdMixed(rest, rv);
+        if (cmd == "serve")      return runServe(rest, rv, gThreads);
 
         usage();
         return 1;

@@ -27,7 +27,9 @@
 namespace kqk {
 
 BruteForce::BruteForce(const Geometry& geo, Material m, const Table* subTable,
-                       bool staleLoss) : g(geo), mat(m) {
+                       bool staleLoss, const Table* subAlt,
+                       const Table* const* subFor) : g(geo), mat(m) {
+    if (subFor) for (int i = 0; i < MAXWP; ++i) subFor_[i] = subFor[i];
     const int nsq = g.nsq;
     stride1 = (m.np >= 2) ? (U64)nsq : 1;
     stride2 = 1;
@@ -64,6 +66,7 @@ BruteForce::BruteForce(const Geometry& geo, Material m, const Table* subTable,
     };
 
     sub = subTable;
+    subAlt_ = subAlt;
     staleLoss_ = staleLoss;
     // What a capture is worth.  A draw for every endgame satisfying the
     // invariant in geometry.hpp; for KNNNK, whatever the KNNK table says about
@@ -71,13 +74,30 @@ BruteForce::BruteForce(const Geometry& geo, Material m, const Table* subTable,
     // solver.cpp on purpose: this file exists to disagree with that one if
     // either is wrong.
     auto capValue = [&](const Pos& pos, Sq to, int cap) -> U8 {
-        if (!sub) return V_DRAW;
+        // Two unlike white men leave two different materials behind, so which
+        // table answers depends on which man was taken.  Written out here
+        // rather than shared with solver.cpp on purpose: this file exists to
+        // disagree with that one if either is wrong.
+        const Table* s = (cap >= 0 && cap < MAXWP) ? subFor_[cap] : nullptr;
+        if (!s) return V_DRAW;
+        // The sub-table names its men in its own order, which need not be
+        // this one's: a pair of alike men comes first here (KQNNK is N,N,Q)
+        // while the two-man tables run strongest first (KQNK is Q,N).  Lay the
+        // survivors out to match the table being read, or the probe lands on
+        // the entry with those two men exchanged.
         Pos q;
         q.wk = pos.wk;
         q.bk = to;
+        Sq  left[MAXWP];
+        Piece lp[MAXWP];
         int k = 0;
-        for (int i = 0; i < m.np; ++i) if (i != cap) q.wp[k++] = pos.wp[i];
-        return sub->valueAt(q, true);
+        for (int i = 0; i < m.np; ++i)
+            if (i != cap) { left[k] = pos.wp[i]; lp[k] = m.piece[i]; ++k; }
+        bool used[MAXWP] = { false, false, false };
+        for (int j = 0; j < k; ++j)
+            for (int i = 0; i < k; ++i)
+                if (!used[i] && lp[i] == s->mat.piece[j]) { q.wp[j] = left[i]; used[i] = true; break; }
+        return s->valueAt(q, true);
     };
 
     // ---- initialisation: mates, stalemates and immediate captures ---------
@@ -112,6 +132,18 @@ BruteForce::BruteForce(const Geometry& geo, Material m, const Table* subTable,
             });
         }
 
+    // The deepest value a conversion put into b[] up front.  Positions whose
+    // every move is a capture are settled during initialisation, at whatever
+    // depth the sub-table gives them, so the depths that exist are not a dense
+    // range starting at zero -- they have gaps, and a gap is not the end.  The
+    // induction below must keep going until it is past the last of these, or
+    // it abandons every seed sitting above the first quiet round.  (The real
+    // solver has the same problem and handles it by remembering such blocks
+    // and handing them to phase A at the right ply.)
+    U8 seedMax = 0;
+    for (U64 i = 0; i < b.size(); ++i)
+        if (isDtm(b[i]) && b[i] > seedMax) seedMax = b[i];
+
     // ---- backward induction, one ply at a time ----------------------------
     for (U32 d = 0; d + 2 <= MAX_PLY; d += 2) {
         U64 madeW = 0, madeB = 0;
@@ -133,7 +165,6 @@ BruteForce::BruteForce(const Geometry& geo, Material m, const Table* subTable,
                     if (hit) { w[i] = (U8)(d + 1); ++madeW; }
                 });
             }
-        if (!madeW) break;
 
         // A black-to-move position is lost once every move it has runs into a
         // white win; its depth is one more than the most stubborn of them.
@@ -163,7 +194,8 @@ BruteForce::BruteForce(const Geometry& geo, Material m, const Table* subTable,
                     if (allWin) { b[i] = (U8)(worst + 1); ++madeB; }
                 });
             }
-        if (!madeB) break;
+        // Quiet round: stop only once no seed can still be waiting above d.
+        if (!madeW && !madeB && d >= seedMax) break;
     }
 
     // Whatever never resolved is drawn.
@@ -197,11 +229,22 @@ Stats BruteForce::census() const {
         if (mat.np == 1) {
             for (cfg[0] = 0; cfg[0] < nsq; ++cfg[0]) fn(cfg);
         } else if (mat.np == 3) {
-            // Three alike: count each unordered triple once.
+            // Count each PHYSICAL placement once, which depends on which of
+            // the three men are interchangeable: all three, the first two, or
+            // none.  Counting every three-man material as an unordered triple
+            // -- true only of KNNNK -- made this census exactly three times
+            // too small for a queen, a queen and a rook.
+            const CfgShape sh = cfgShapeOf(mat.eg);
             for (cfg[0] = 0; cfg[0] < nsq; ++cfg[0])
-                for (cfg[1] = cfg[0] + 1; cfg[1] < nsq; ++cfg[1])
-                    for (cfg[2] = cfg[1] + 1; cfg[2] < nsq; ++cfg[2])
+                for (cfg[1] = (sh == CfgShape::TripleOrdered ? 0 : cfg[0] + 1);
+                     cfg[1] < nsq; ++cfg[1]) {
+                    if (cfg[1] == cfg[0]) continue;
+                    for (cfg[2] = (sh == CfgShape::TripleAlike ? cfg[1] + 1 : 0);
+                         cfg[2] < nsq; ++cfg[2]) {
+                        if (cfg[2] == cfg[0] || cfg[2] == cfg[1]) continue;
                         fn(cfg);
+                    }
+                }
         } else {
             for (cfg[0] = 0; cfg[0] < nsq; ++cfg[0])
                 for (cfg[1] = mat.identical ? cfg[0] + 1 : 0; cfg[1] < nsq; ++cfg[1]) {
@@ -253,7 +296,7 @@ U64 bruteForceCheck(const Table& t, bool progress) {
     const Geometry& g = t.geo;
     const Material& m = t.mat;
     const int nsq = g.nsq;
-    BruteForce bf(g, m, t.sub, t.stalemateLoss);
+    BruteForce bf(g, m, t.sub, t.stalemateLoss, t.subAlt, t.subFor);
 
     // ---- every placement, both sides to move ------------------------------
     U64 bad = 0, checked = 0;

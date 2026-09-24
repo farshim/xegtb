@@ -768,6 +768,110 @@ void TableKQKKCap::computeStats(int threads) {
 void kqkkCapMoves(const TableKQKKCap& t, const PosKK& p, bool whiteToMove,
                   const std::function<void(const PosKK&, CapMove, int16_t)>& fn) {
     const Geometry& g = t.geo;
+    const int nb = (p.bk1 >= 0) + (p.bk2 >= 0);
+
+    // The game is over: someone's last king has gone, and rule 3 says that
+    // settled it on the spot.  No successor, and nothing to walk.
+    if (p.wk < 0 || nb == 0) return;
+
+    // Material this table converts into.  Every line here is the matching
+    // branch of reKQK / reKKK / reKK in the verifier above, which is the
+    // generator written straight down the rules rather than through the
+    // solver's rays; keeping the two in step is the whole point of copying
+    // their shape.  A move that takes the opponent's last king ends the game
+    // and leaves no position to look up, so it reports -1 -- the same sentinel
+    // the four-man walk already uses for ...KxK.
+    if (p.wq < 0 || nb == 1) {
+        const bool haveQ = p.wq >= 0;
+        // Which slot the surviving black king occupies, so that a successor
+        // keeps the shape its caller handed in.
+        const int only = (p.bk1 >= 0) ? 0 : 1;
+        const Sq bk = (only == 0) ? p.bk1 : p.bk2;
+        auto blackAt = [&](Sq v) { return only == 0 ? PosKK{ 0, 0, v, -1 } : PosKK{ 0, 0, -1, v }; };
+
+        if (haveQ) {                                   // K + Q vs K
+            if (whiteToMove) {
+                for (int k = 0; k < 8; ++k) {
+                    const Sq to = kstep(g, p.wk, k);
+                    if (to < 0 || to == p.wq) continue;
+                    if (to == bk) { PosKK q = blackAt(-1); q.wk = to; q.wq = p.wq;
+                                    fn(q, CapMove::TakesKing, -1); continue; }
+                    PosKK q = blackAt(bk); q.wk = to; q.wq = p.wq;
+                    fn(q, CapMove::Quiet, t.q3Value(to, p.wq, bk, false));
+                }
+                for (int d = 0; d < 8; ++d) {
+                    Sq to = p.wq;
+                    for (;;) {
+                        to = kstep(g, to, d);
+                        if (to < 0 || to == p.wk) break;
+                        if (to == bk) { PosKK q = blackAt(-1); q.wk = p.wk; q.wq = to;
+                                        fn(q, CapMove::TakesKing, -1); break; }
+                        PosKK q = blackAt(bk); q.wk = p.wk; q.wq = to;
+                        fn(q, CapMove::Quiet, t.q3Value(p.wk, to, bk, false));
+                    }
+                }
+            } else {
+                for (int k = 0; k < 8; ++k) {
+                    const Sq to = kstep(g, bk, k);
+                    if (to < 0) continue;
+                    PosKK q = blackAt(to); q.wk = p.wk; q.wq = p.wq;
+                    if (to == p.wk) { q.wk = -1; fn(q, CapMove::TakesWhiteKing, -1); continue; }
+                    if (to == p.wq) { q.wq = -1;
+                                      fn(q, CapMove::TakesQueen, t.kkValue(p.wk, to, true)); continue; }
+                    fn(q, CapMove::Quiet, t.q3Value(p.wk, p.wq, to, true));
+                }
+            }
+            return;
+        }
+        if (nb == 2) {                                 // K vs K + K
+            if (whiteToMove) {
+                for (int k = 0; k < 8; ++k) {
+                    const Sq to = kstep(g, p.wk, k);
+                    if (to < 0) continue;
+                    if (to == p.bk1) fn(PosKK{ to, -1, -1, p.bk2 }, CapMove::TakesKing,
+                                        t.kkValue(to, p.bk2, false));
+                    else if (to == p.bk2) fn(PosKK{ to, -1, p.bk1, -1 }, CapMove::TakesKing,
+                                             t.kkValue(to, p.bk1, false));
+                    else fn(PosKK{ to, -1, p.bk1, p.bk2 }, CapMove::Quiet,
+                            t.k3Value(to, p.bk1, p.bk2, false));
+                }
+            } else {
+                for (int s = 0; s < 2; ++s) {
+                    const Sq from = s ? p.bk2 : p.bk1, oth = s ? p.bk1 : p.bk2;
+                    for (int k = 0; k < 8; ++k) {
+                        const Sq to = kstep(g, from, k);
+                        if (to < 0 || to == oth) continue;
+                        const PosKK q{ p.wk, -1, s ? oth : to, s ? to : oth };
+                        if (to == p.wk) { fn(PosKK{ -1, -1, q.bk1, q.bk2 },
+                                             CapMove::TakesWhiteKing, -1); continue; }
+                        fn(q, CapMove::Quiet, t.k3Value(p.wk, q.bk1, q.bk2, true));
+                    }
+                }
+            }
+            return;
+        }
+        // K vs K.  The next capture either way ends it.
+        if (whiteToMove) {
+            for (int k = 0; k < 8; ++k) {
+                const Sq to = kstep(g, p.wk, k);
+                if (to < 0) continue;
+                if (to == bk) { PosKK q = blackAt(-1); q.wk = to; q.wq = -1;
+                                fn(q, CapMove::TakesKing, -1); continue; }
+                PosKK q = blackAt(bk); q.wk = to; q.wq = -1;
+                fn(q, CapMove::Quiet, t.kkValue(to, bk, false));
+            }
+        } else {
+            for (int k = 0; k < 8; ++k) {
+                const Sq to = kstep(g, bk, k);
+                if (to < 0) continue;
+                PosKK q = blackAt(to); q.wk = p.wk; q.wq = -1;
+                if (to == p.wk) { q.wk = -1; fn(q, CapMove::TakesWhiteKing, -1); continue; }
+                fn(q, CapMove::Quiet, t.kkValue(p.wk, to, true));
+            }
+        }
+        return;
+    }
+
     if (whiteToMove) {
         for (int k = 0; k < 8; ++k) {
             const Sq to = kstep(g, p.wk, k);

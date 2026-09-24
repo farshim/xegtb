@@ -1,0 +1,57 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>xegtb -- capture chess</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="style.css">
+
+<header>
+  <a class="back" href="index.html">&larr; both rule sets</a>
+  <h1>Capture chess on an <i>n</i> &times; <i>n</i> board</h1>
+  <p>
+    No man is privileged: a king is a piece that steps one square and can be
+    taken like any other. There is no check and no mate, and the game is won by
+    taking the opponent's last man. That makes three kinds of endgame &mdash;
+    one king a side, several kings, or a side with no king at all &mdash; and
+    they play quite differently, so they are listed apart. Every material of
+    at most five men is listed, solved or not.
+  </p>
+</header>
+
+<main>
+  <div id="sum" class="busy">counting</div>
+  <input id="filter" class="filter" placeholder="filter -- KKK, vs NN, rook...">
+  <div id="cov" class="busy">enumerating the materials</div>
+</main>
+
+<script src="site.js"></script>
+<script>
+// The three kinds, in the order they make sense to read: the one that looks
+// like chess, then the multi-royal one, then the one with no king at all.
+const ORDER = [
+  "One king each: the same shape as chess, won by taking the king",
+  "Several kings: a side is beaten only when every one of them has fallen",
+  "No king: one side has none, and loses when its last man goes",
+];
+
+fetch("api/coverage?rules=capture&men=5")
+  .then(r => r.json())
+  .then(d => {
+    const boards = d.rows.reduce((a, m) => a + m.boards.length, 0);
+    el("sum").className = "";
+    el("sum").innerHTML = `
+      <div class="cards">
+        <div class="card"><div class="label">${d.materials.toLocaleString()}</div>
+          <div class="title">materials exist</div>
+          <div class="blurb">every bag of men, up to five, White at most four and Black at most two</div></div>
+        <div class="card"><div class="label">${d.supported.toLocaleString()}</div>
+          <div class="title">have a solver</div>
+          <div class="blurb">like men on both sides, or two unlike white men against one</div></div>
+        <div class="card"><div class="label">${d.stored.toLocaleString()}</div>
+          <div class="title">are on the drive</div>
+          <div class="blurb">${boards.toLocaleString()} tables</div></div>
+      </div>`;
+    renderCoverage(el("cov"), d, ORDER);
+    wireFilter(el("filter"), el("cov"));
+  })
+  .catch(e => { el("cov").className = "err"; el("cov").textContent = "could not reach the server: " + e; });
+</script>

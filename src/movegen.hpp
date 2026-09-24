@@ -38,20 +38,23 @@ inline int pieceOnT(const Pos& p, Sq s) {
 // out of the count -- the one Black is capturing, which is no longer there to
 // defend anything.  A man standing exactly on `t` never blocks a ray to `t`,
 // so it is harmless to keep passing it as a blocker.
-// A blocker only matters to a slider, and the only three-piece endgame here is
-// KNNNK, whose men all jump.  So for NP == 3 the blocker arguments are unread
-// and passing the king alone is exact, not an approximation; the static_assert
-// is what keeps that true if another three-piece endgame is ever added.
+// With three men the other two block, and until there were three-man endgames
+// with a slider in them that did not matter: KNNNK's men all jump, so passing
+// the king alone was exact.  A static_assert held the file to that, and it
+// fired the moment KQRBK arrived -- correctly.  Now every man that is still on
+// the board is passed as a blocker, which is what a rook's ray needs and what
+// a knight ignores.
 template <Endgame EG>
 inline bool attackedByPieceT(const Geometry& g, const Pos& p, Sq t, int ignore = -1) {
     constexpr int NP = npOf(EG);
     if constexpr (NP == 3) {
-        static_assert(pieceOf(EG, 0) == Piece::Knight && pieceOf(EG, 1) == Piece::Knight &&
-                      pieceOf(EG, 2) == Piece::Knight,
-                      "three-piece endgames must be all-knight: see the blocker note above");
-        for (int i = 0; i < 3; ++i)
-            if (ignore != i && g.attacks(pieceOf(EG, i), p.wp[i], t, p.wk))
-                return true;
+        for (int i = 0; i < 3; ++i) {
+            if (ignore == i) continue;
+            const int j = (i + 1) % 3, k = (i + 2) % 3;
+            const Sq bj = (ignore == j) ? Sq(-1) : p.wp[j];
+            const Sq bk = (ignore == k) ? Sq(-1) : p.wp[k];
+            if (g.attacks(pieceOf(EG, i), p.wp[i], t, p.wk, bj, bk)) return true;
+        }
         return false;
     } else {
         if (ignore != 0 && g.attacks(pieceOf(EG, 0), p.wp[0], t, p.wk,
@@ -96,18 +99,18 @@ inline void genWhiteT(const Geometry& g, const Pos& p, F&& fn) {
         // piece -- and the black king must be in that list, because for a
         // slider it does not merely forbid the square, it stops the ray.
         //
-        // Three knights need four: two kings and two other knights.  Knights
-        // jump, so nothing about a knight's move depends on what stands
-        // between; the three slots therefore carry the men whose *squares* are
-        // blocked -- king and the two other knights -- and the black king is
-        // excluded by the explicit test, which for a jumping piece is exact.
+        // Three men need four occupancies: both kings and the other two.  The
+        // black king has to be among them, not merely tested for afterwards:
+        // for a slider it does not only forbid the square, it stops the ray.
+        // While the only three-man endgame was KNNNK that distinction cost
+        // nothing -- knights jump -- and the code passed three squares and
+        // tested the black king separately.  With a rook in the material it
+        // would have walked straight through him.
         if constexpr (NP == 3) {
-            static_assert(pieceOf(EG, I) == Piece::Knight,
-                          "a slider here would need the black king as a blocker");
             const Sq o1 = p.wp[I == 0 ? 1 : 0];
             const Sq o2 = p.wp[I == 2 ? 1 : 2];
-            forEachMove<pieceOf(EG, I)>(g, p.wp[I], p.wk, o1, o2, [&](Sq t) {
-                if (t != p.bk) { Pos q = p; q.wp[I] = t; fn(q); }
+            forEachMove<pieceOf(EG, I)>(g, p.wp[I], p.wk, p.bk, o1, o2, [&](Sq t) {
+                Pos q = p; q.wp[I] = t; fn(q);
                 return true;
             });
         } else {

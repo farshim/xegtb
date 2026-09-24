@@ -4,11 +4,11 @@ LDFLAGS  ?= -pthread
 
 SRC := src/mixed.cpp src/solver.cpp src/stats.cpp src/verify.cpp src/probe.cpp src/brute.cpp \
         src/policy.cpp src/kqkr.cpp src/kqkbb.cpp src/kqkk.cpp src/kqkkcap.cpp \
-        src/kings.cpp \
+        src/kings.cpp src/general.cpp src/explore.cpp src/serve.cpp \
         src/io.cpp src/main.cpp
 OBJ := $(SRC:.cpp=.o)
 HDR := src/geometry.hpp src/index.hpp src/indexbb.hpp src/indexkk.hpp \
-        src/movegen.hpp src/table.hpp
+        src/movegen.hpp src/table.hpp src/explore.hpp src/general.hpp
 
 all: egtb kqk krk kbbk kbnk
 

@@ -1014,6 +1014,31 @@ static void forEachPredSlot(const Geo& g, const Tbl& t, const Sym& sy,
     }
 }
 
+// The byte form holds |v| <= N_MAX, and widening reallocates both value
+// arrays, so it may only run between sweeps with no worker going.  That makes
+// it PREDICTIVE: it has to happen before the sweep that could produce an
+// out-of-range value, never in reaction to one -- put() can only abort by then.
+//
+// Two things produce one.  A sweep at a depth past the limit is the obvious
+// one.  The other is a conversion: a capture copies a value out of a sub-table,
+// so a table whose sub-table is already deeper than the limit can write a value
+// past it on its very first sweep, before any depth counter has climbed.  The
+// legacy solve() guards only the first, which is why it is not enough here.
+//
+// EGTB_WIDEN_AT lowers the threshold so the widening path can be exercised on
+// shallow tables: forcing it early must not change a single entry.
+static int widenAtThreshold() {
+    static const int at = getenv("EGTB_WIDEN_AT") ? std::atoi(getenv("EGTB_WIDEN_AT")) : N_MAX;
+    return at;
+}
+
+static void widenIfConverting(Tbl& t, const Tbl* capW, const Tbl* capB) {
+    int subMax = 0;
+    if (capW) subMax = std::max(subMax, capW->maxAbs);
+    if (capB) subMax = std::max(subMax, capB->maxAbs);
+    if (!t.wide && subMax >= widenAtThreshold()) t.widen();
+}
+
 static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
                           const Tbl* capB, int nthr, bool progress) {
     t.n = g.n; t.m = g.m; t.geo = &g; t.sym = &sy;
@@ -1033,6 +1058,10 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
     }
 
     t.alloc(t.N);
+    // A conversion can copy a sub-table's value straight in on the first
+    // sweep, so this decision has to be taken here, before any value is
+    // written, not when a depth counter reaches the limit.
+    widenIfConverting(t, capW, capB);
     // One NIBBLE per slot, not one byte.  Byte i carries both of slot i's
     // counters -- the low nibble for White to move, the high for Black -- so
     // the array is N bytes rather than 2N.  On KKKK v K n=15 that is 2790 MB
@@ -1300,6 +1329,11 @@ static bool solveFrontier(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
         } else {
             d = bitsD; useBits = true;
         }
+
+        // Between buckets, with no worker running: the events about to be run
+        // carry depth d and write values of magnitude d, so the byte form has
+        // to go before a bucket at the limit rather than during it.
+        if (!t.wide && d >= widenAtThreshold()) t.widen();
 
         Timer tS;
         if (useBits) {
@@ -1613,6 +1647,7 @@ static void solve(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW, const Tb
 // solver hitting; it shows up as depths a few plies too long.
 static void fixpoint(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
                      const Tbl* capB, int nthr, int subMax) {
+    widenIfConverting(t, capW, capB);
     std::vector<U64> todo;
     for (U64 i = 0; i < t.N; ++i)
         for (int stm = 0; stm < 2; ++stm)
@@ -1630,6 +1665,10 @@ static void fixpoint(const Geo& g, Tbl& t, const Sym& sy, const Tbl* capW,
     }
 
     for (int k = 1;; ++k) {
+        // Same rule as the frontier: between sweeps, before the one that could
+        // write past the byte.  A re-evaluation here settles on a value one
+        // deeper than a successor, so sweep k can produce magnitude k + 1.
+        if (!t.wide && k >= widenAtThreshold()) t.widen();
         std::atomic<U64> changed{0};
         std::atomic<int> pend{0};
         auto worker = [&](size_t lo, size_t hi) {
@@ -1678,6 +1717,11 @@ struct Suite {
     Tbl t[5][3];
     Sym sym[5];
     bool have[5][3] = {};
+    // How the lattice came to be: one count for tables taken off the store as
+    // they stood, one for tables this run computed.  The browser explorer says
+    // which, because "the store made it faster" is a claim that should be
+    // checkable per configuration rather than believed.
+    int mappedTables = 0, builtTables = 0;
     int W = 0, B = 0;
     std::string store;            // a directory of .tb files, or empty
     bool storeVerify = false;     // check the payload hash on the way in
@@ -1757,6 +1801,7 @@ struct Suite {
                     const std::string path = store + "/" + tbName(w, b, g.pc[0], g.pc[1], g.n);
                     if (tbMap(T, path, storeVerify, progress)) {
                         have[w][b] = true;
+                        ++mappedTables;
                         if (progress)
                             std::printf("   loaded K%d vs K%d: %llu slots/side (%llu positions), "
                                         "deepest %d ply\n", w, b, (unsigned long long)T.N,
@@ -1845,6 +1890,7 @@ struct Suite {
                     solve(g, T, sym[w], cW, cB, nthr, progress);
                 }
                 have[w][b] = true;
+                ++builtTables;
                 if (!store.empty())
                     tbSave(T, store + "/" + tbName(w, b, g.pc[0], g.pc[1], g.n), progress);
                 if (progress)
@@ -1936,23 +1982,58 @@ static S16 rederiveFast(const Suite& S, const Tbl& t, const int* W, const int* B
 struct Census { U64 win[2] = {0, 0}, draw[2] = {0, 0}, loss[2] = {0, 0}; };
 
 // Walk one table: census, deepest win each way, and (if asked) the Bellman check.
+// Quiet: neither side has a capture available, whoever is to move.  Written
+// on top of genMoves rather than on an attack test of its own, so that "can be
+// taken" means exactly what the solver means by it for every one of the five
+// men -- a rook's ray blocked by a third man included.
+static bool quietPlacement(const Geo& g, const std::vector<int>& W,
+                           const std::vector<int>& B) {
+    std::vector<Mv> mvs;
+    for (int stm = 0; stm < 2; ++stm) {
+        genMoves(g, W, B, stm, mvs);
+        for (const Mv& m : mvs) if (m.cap) return false;
+    }
+    return true;
+}
+
+// `qstats` turns the cheap monotone quiet filter into a full pass: every
+// placement is tested, which is what counting quiet placements requires and
+// what the filter can never give.  It costs two move generations a placement,
+// so it stays off unless asked for.  Quietness is a property of the placement
+// alone -- quietPlacement already looks at both sides -- so the test runs once
+// per placement and serves both sides to move.
 static U64 walk(const Suite& S, const Tbl& t, int nthr, bool verify,
-                Census& cen, int deepW[6], int deepB[6], int& dW, int& dB) {
+                Census& cen, int deepW[6], int deepB[6], int& dW, int& dB,
+                int deepQ[6], int& dQ, int deepQB[6], int& dQB,
+                bool qstats, Census& qcen, U64& qpos) {
     std::atomic<U64> bad{0};
-    std::vector<Census>            cs(nthr);
-    std::vector<std::array<int, 6>> bw(nthr), bb(nthr);
-    std::vector<int>               vw(nthr, 0), vb(nthr, 0);
+    std::vector<Census>            cs(nthr), qs(nthr);
+    std::vector<std::array<int, 6>> bw(nthr), bb(nthr), bq(nthr), bqb(nthr);
+    std::vector<int>               vw(nthr, 0), vb(nthr, 0), vq(nthr, 0), vqb(nthr, 0);
+    std::vector<U64>               qn(nthr, 0);
 
     const Sym& sy = *t.sym;
     auto worker = [&](int id, U64 lo, U64 hi) {
-        int B[4]; Census c; U64 nbad = 0;
-        int bestW = 0, bestB = 0; std::array<int, 6> pw{}, pb{};
+        int B[4]; Census c, qc; U64 nbad = 0, nq = 0;
+        int bestW = 0, bestB = 0, bestQ = 0, bestQB = 0;
+        std::array<int, 6> pw{}, pb{}, pq{}, pqb{};
+        std::vector<int> qw((size_t)t.w), qb((size_t)t.b);
         for (U64 blk = lo; blk < hi; ++blk) {
             const int* W = (const int*)&sy.blkSq[(size_t)blk * t.w];
             const U64 wgt = sy.wt[blk];          // real positions this slot stands for
             for (int q = 0; q < t.b; ++q) B[q] = q;
             for (U64 br = 0; br < t.nb; ++br) {
                 const U64 i = blk * t.nb + br;
+                // Quietness is a property of the placement, not of who is to
+                // move, so the full pass settles it once here and both sides
+                // to move read the same answer.  Testing it per (placement,
+                // stm) would double the cost for an identical result.
+                bool isQ = false;
+                if (qstats) {
+                    for (int q = 0; q < t.w; ++q) qw[q] = W[q];
+                    for (int q = 0; q < t.b; ++q) qb[q] = B[q];
+                    isQ = quietPlacement(S.g, qw, qb);
+                }
                 for (int stm = 0; stm < 2; ++stm) {
                     S16 x = t.get(stm, i);
                     if (x == ILL) continue;
@@ -1960,10 +2041,45 @@ static U64 walk(const Suite& S, const Tbl& t, int nthr, bool verify,
                     // Translate mover-relative to White-relative for the census.
                     int wrel = (stm == 0) ? x : -x;
                     if (wrel > 0) c.win[stm] += wgt; else if (wrel < 0) c.loss[stm] += wgt; else c.draw[stm] += wgt;
+                    if (isQ) {
+                        if (wrel > 0) qc.win[stm] += wgt;
+                        else if (wrel < 0) qc.loss[stm] += wgt;
+                        else qc.draw[stm] += wgt;
+                        if (stm == 0) nq += wgt;   // placements, counted once
+                    }
                     if (stm == 0 && x > bestW) {
                         bestW = x; int k = 0;
                         for (int q = 0; q < t.w; ++q) pw[k++] = W[q];
                         for (int q = 0; q < t.b; ++q) pw[k++] = B[q];
+                    }
+                    if (qstats) {
+                        // The full pass already knows whether this placement is
+                        // quiet, so the deepest quiet win each way is exact and
+                        // costs nothing further.
+                        if (isQ && stm == 0 && x > bestQ) {
+                            bestQ = x; int k = 0;
+                            for (int q = 0; q < t.w; ++q) pq[k++] = W[q];
+                            for (int q = 0; q < t.b; ++q) pq[k++] = B[q];
+                        }
+                        if (isQ && stm == 1 && x > bestQB) {
+                            bestQB = x; int k = 0;
+                            for (int q = 0; q < t.w; ++q) pqb[k++] = W[q];
+                            for (int q = 0; q < t.b; ++q) pqb[k++] = B[q];
+                        }
+                    } else if (stm == 0 && x > bestQ) {
+                        // The quiet test costs two move generations, so without
+                        // the full pass it runs only where it could change the
+                        // answer: on a white-to-move win already deeper than the
+                        // best quiet one found so far.  That is a monotone
+                        // filter, so it fires a handful of times per thread over
+                        // the whole table rather than once a slot.
+                        for (int q = 0; q < t.w; ++q) qw[q] = W[q];
+                        for (int q = 0; q < t.b; ++q) qb[q] = B[q];
+                        if (quietPlacement(S.g, qw, qb)) {
+                            bestQ = x; int k = 0;
+                            for (int q = 0; q < t.w; ++q) pq[k++] = W[q];
+                            for (int q = 0; q < t.b; ++q) pq[k++] = B[q];
+                        }
                     }
                     if (stm == 1 && x > bestB) {
                         bestB = x; int k = 0;
@@ -1974,7 +2090,9 @@ static U64 walk(const Suite& S, const Tbl& t, int nthr, bool verify,
                 nextCombo(B, t.b, S.g.m);
             }
         }
-        cs[id] = c; bw[id] = pw; bb[id] = pb; vw[id] = bestW; vb[id] = bestB;
+        cs[id] = c; bw[id] = pw; bb[id] = pb; bq[id] = pq; bqb[id] = pqb;
+        vw[id] = bestW; vb[id] = bestB; vq[id] = bestQ; vqb[id] = bestQB;
+        qs[id] = qc; qn[id] = nq;
         bad += nbad;
     };
 
@@ -1986,11 +2104,18 @@ static U64 walk(const Suite& S, const Tbl& t, int nthr, bool verify,
     }
     for (auto& x : th) x.join();
 
-    dW = dB = 0;
+    dW = dB = dQ = dQB = 0;
+    qpos = 0;
     for (int q = 0; q < nthr; ++q) {
-        for (int s = 0; s < 2; ++s) { cen.win[s] += cs[q].win[s]; cen.draw[s] += cs[q].draw[s]; cen.loss[s] += cs[q].loss[s]; }
+        for (int s = 0; s < 2; ++s) {
+            cen.win[s] += cs[q].win[s]; cen.draw[s] += cs[q].draw[s]; cen.loss[s] += cs[q].loss[s];
+            qcen.win[s] += qs[q].win[s]; qcen.draw[s] += qs[q].draw[s]; qcen.loss[s] += qs[q].loss[s];
+        }
+        qpos += qn[q];
         if (vw[q] > dW) { dW = vw[q]; for (int i = 0; i < 6; ++i) deepW[i] = bw[q][i]; }
         if (vb[q] > dB) { dB = vb[q]; for (int i = 0; i < 6; ++i) deepB[i] = bb[q][i]; }
+        if (vq[q] > dQ) { dQ = vq[q]; for (int i = 0; i < 6; ++i) deepQ[i] = bq[q][i]; }
+        if (vqb[q] > dQB) { dQB = vqb[q]; for (int i = 0; i < 6; ++i) deepQB[i] = bqb[q][i]; }
     }
     return bad.load();
 }
@@ -2176,10 +2301,18 @@ void TableKings::generate(int threads, bool progress) {
     p->st.seconds = tm.s();
 }
 
+void TableKings::tableCounts(int& mapped, int& built) const {
+    mapped = p->s.mappedTables;
+    built = p->s.builtTables;
+}
+
 // Fill one stats block from a walk of one table.
-static void fill(const Suite& S, const Tbl& t, int nthr, bool verify, KingsStats& out) {
-    Census c; int dW = 0, dB = 0, pw[6] = {}, pb[6] = {};
-    out.mismatches = walk(S, t, nthr, verify, c, pw, pb, dW, dB);
+static void fill(const Suite& S, const Tbl& t, int nthr, bool verify, KingsStats& out,
+                 bool qstats = false) {
+    Census c, qc; U64 qpos = 0;
+    int dW = 0, dB = 0, dQ = 0, dQB = 0, pw[6] = {}, pb[6] = {}, pq[6] = {}, pqb[6] = {};
+    out.mismatches = walk(S, t, nthr, verify, c, pw, pb, dW, dB, pq, dQ, pqb, dQB,
+                          qstats, qc, qpos);
     out.verified   = verify;
     out.n = t.n; out.w = t.w; out.b = t.b;
     out.slots = t.N; out.positions = t.legal;
@@ -2188,16 +2321,29 @@ static void fill(const Suite& S, const Tbl& t, int nthr, bool verify, KingsStats
     out.deepestWhite = dW; out.deepestBlack = dB;
     out.posWhite.assign(pw, pw + t.w + t.b);
     out.posBlack.assign(pb, pb + t.w + t.b);
+    out.deepestWhiteQuiet = dQ;
+    if (dQ) out.posWhiteQuiet.assign(pq, pq + t.w + t.b);
+    else    out.posWhiteQuiet.clear();
+    out.quietCensus = qstats;
+    out.deepestBlackQuiet = qstats ? dQB : 0;
+    if (qstats && dQB) out.posBlackQuiet.assign(pqb, pqb + t.w + t.b);
+    else               out.posBlackQuiet.clear();
+    out.quietPositions = qpos;
+    out.qwWin = qc.win[0]; out.qwDraw = qc.draw[0]; out.qwLoss = qc.loss[0];
+    out.qbWin = qc.win[1]; out.qbDraw = qc.draw[1]; out.qbLoss = qc.loss[1];
 }
 
-void TableKings::census(int threads, bool verify) {
+void TableKings::census(int threads, bool verify, bool quietStats) {
     const int W = p->s.W, B = p->s.B;
     double keep = p->st.seconds;
-    fill(p->s, p->s.t[W][B], threads, verify, p->st);
+    fill(p->s, p->s.t[W][B], threads, verify, p->st, quietStats);
     p->st.seconds = keep;
+    // The conversions get the quiet pass too: each is an endgame in its own
+    // right and the statistics are collected per configuration, not per run.
     for (int w = 1; w <= W; ++w)
         for (int b = 1; b <= B; ++b)
-            if (w != W || b != B) fill(p->s, p->s.t[w][b], threads, false, p->sub[w][b]);
+            if (w != W || b != B)
+                fill(p->s, p->s.t[w][b], threads, false, p->sub[w][b], quietStats);
 }
 
 const KingsStats& TableKings::stats() const { return p->st; }
@@ -2213,6 +2359,35 @@ std::string TableKings::line(const std::vector<Sq>& W, const std::vector<Sq>& B,
     std::vector<int> a(W.begin(), W.end()), c(B.begin(), B.end());
     std::sort(a.begin(), a.end()); std::sort(c.begin(), c.end());
     return playOut(p->s, a, c, wtm ? 0 : 1, cap);
+}
+
+std::vector<KingsMove> TableKings::moves(const std::vector<Sq>& W,
+                                        const std::vector<Sq>& B, bool wtm) const {
+    std::vector<int> a(W.begin(), W.end()), c(B.begin(), B.end());
+    std::sort(a.begin(), a.end()); std::sort(c.begin(), c.end());
+    std::vector<Mv> mvs;
+    genMoves(p->s.g, a, c, wtm ? 0 : 1, mvs);
+    std::vector<KingsMove> out;
+    out.reserve(mvs.size());
+    for (const Mv& m : mvs) {
+        KingsMove k;
+        k.from = (Sq)m.from; k.to = (Sq)m.to;
+        k.capture = m.cap; k.ends = m.ends;
+        k.W.assign(m.W.begin(), m.W.end());
+        k.B.assign(m.B.begin(), m.B.end());
+        // A move that took the last enemy man wins on the spot and leaves no
+        // placement to look up; anything else is priced with the other side to
+        // move, in whatever table the surviving material lands in.
+        k.value = m.ends ? 0 : p->s.look(m.W, m.B, wtm ? 1 : 0);
+        out.push_back(std::move(k));
+    }
+    return out;
+}
+
+bool TableKings::quiet(const std::vector<Sq>& W, const std::vector<Sq>& B) const {
+    std::vector<int> a(W.begin(), W.end()), c(B.begin(), B.end());
+    std::sort(a.begin(), a.end()); std::sort(c.begin(), c.end());
+    return quietPlacement(p->s.g, a, c);
 }
 
 std::string TableKings::square(Sq s) const { return p->s.g.name(s); }

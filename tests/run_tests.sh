@@ -689,5 +689,314 @@ b=$($EGTB kqkbb -n 6 --threads 5 2>&1 | grep 'deepest white win')
                 || { say "   KQKBB OUTPUT IS THREAD-DEPENDENT"; fail=1; }
 
 say ""
+say "== 22. the browser explorer: every configuration answers, and answers right =="
+say "   (egtb serve builds each configuration on demand and serves it as JSON."
+say "    The check that matters is the one a person clicking 'play the best move'"
+say "    would notice: the value must fall by exactly one ply each time, and the"
+say "    line must be as long as the opening value said.  That exercises the"
+say "    adapters, the value conversions and the move walk of every table at once.)"
+if ! command -v curl >/dev/null 2>&1; then
+  say "   curl not found -- section skipped"
+else
+  $EGTB serve --port 0 --no-tables --root web > "$TMP/serve.out" 2>&1 &
+  serve_pid=$!
+  # Wait for the banner rather than sleeping a fixed time.  `sleep 0.1` is not
+  # portable, so the wait between looks is a no-op loop.
+  port=""
+  i=0
+  while [ $i -lt 200 ]; do
+    port=$(sed -n 's|.*127\.0\.0\.1:\([0-9][0-9]*\)/.*|\1|p' "$TMP/serve.out" 2>/dev/null | head -1)
+    [ -n "$port" ] && break
+    i=$((i + 1))
+    awk 'BEGIN{for(k=0;k<300000;k++);}' </dev/null
+  done
+  if [ -z "$port" ]; then
+    say "   SERVER DID NOT START"; cat "$TMP/serve.out"; fail=1
+  else
+    api="http://127.0.0.1:$port/api"
+    # Occurrence $1 of a repeated JSON key, in document order.  The top-level
+    # value comes before the move list and the first move is the best one, so
+    # occurrence 1 is the position and occurrence 2 is its best move.
+    nth() { grep -o "\"$2\":[^,}]*" | sed -n "$1p" | cut -d: -f2- | tr -d '"'; }
+    nthstr() { grep -o "\"$2\":\"[^\"]*\"" | sed -n "$1p" | cut -d'"' -f4; }
+
+    curl -sf "http://127.0.0.1:$port/index.html" | grep -q "Endgame tablebases" \
+      && say "   the catalogue page is served                                   ok" \
+      || { say "   INDEX PAGE NOT SERVED"; fail=1; }
+
+    fams=$(curl -sf "$api/families" | grep -o '"id":"[^"]*"' | cut -d'"' -f4)
+    nfam=$(printf '%s\n' "$fams" | grep -c .)
+    [ "$nfam" -ge 20 ] \
+      && say "   the catalogue lists $nfam configurations                          ok" \
+      || { say "   CATALOGUE IS EMPTY OR TOO SHORT ($nfam)"; fail=1; }
+
+    # The published 8x8 KQK figure, reached through the web path this time: the
+    # deepest win from a quiet position is here the deepest win full stop, and
+    # it is the one README quotes.
+    kqk=$(curl -s "$api/position?family=kqk&n=8")
+    echo "$kqk" | grep -q '"pos":"wKa1,wQb2,bKf5"' \
+      && echo "$kqk" | grep -q "mate in 10 (19 plies)" \
+      && say "   KQK 8x8 opens on wKa1 wQb2 bKf5, mate in 10                    ok" \
+      || { say "   KQK 8x8 OPENING POSITION IS WRONG"; fail=1; }
+
+    # Every configuration, played out under best play.  `checked` counting up
+    # to $nfam is what stops a broken loop from passing silently.
+    checked=0
+    for f in $fams; do
+      j=$(curl -s "$api/position?family=$f")
+      case "$j" in
+        ""|*'"error"'*) say "   NO USABLE ANSWER FOR $f: ${j:-nothing}"; fail=1; continue ;;
+      esac
+      n=$(echo "$j" | nth 1 n)
+      kind=$(echo "$j" | nthstr 1 kind)
+      want=$(echo "$j" | nth 1 plies)
+      # The root as it came, before the walk below reassigns any of this.
+      j0="$j"; kind0="$kind"
+      stm0=$(echo "$j0" | nthstr 1 stm)
+      played=0
+      bad=""
+      # A depth no table here could hold.  The deepest win anywhere in this
+      # program is a few hundred plies; a root claiming tens of thousands is a
+      # reader that has walked off the end of its value array, which is what a
+      # general table read through the plain index rather than the reduced one
+      # did -- it reported "mate in 16375" on a 6 x 6 board.  A bound this
+      # loose can only fire on nonsense.
+      case "$want" in
+        ''|*[!0-9-]*) bad="the root has no usable depth: '$want'" ;;
+        *) [ "$want" -gt 10000 ] && bad="the root claims $want plies, which no table here holds" ;;
+      esac
+      while [ "$kind" = "white" ] || [ "$kind" = "black" ]; do
+        cur=$(echo "$j" | nth 1 plies)
+        mk=$(echo "$j" | nthstr 2 kind)
+        mp=$(echo "$j" | nth 2 plies)
+        if [ -z "$mk" ]; then bad="no move from a won position at ply $played"; break; fi
+        if [ "$mk" != "$kind" ]; then bad="the best move changes the outcome at ply $played"; break; fi
+        if [ "$mp" -ne $((cur - 1)) ]; then bad="ply $played: $cur -> $mp is not a step of one"; break; fi
+        played=$((played + 1))
+        [ "$mp" -eq 0 ] && break
+        np=$(echo "$j" | nthstr 2 pos)
+        ns=$(echo "$j" | nthstr 2 stm)
+        j=$(curl -s "$api/position?family=$f&n=$n&pos=$np&stm=$ns")
+        case "$j" in
+          ""|*'"error"'*) bad="the server would not replay $np: ${j:-no answer}"; break ;;
+        esac
+        kind=$(echo "$j" | nthstr 1 kind)
+      done
+      if [ -z "$bad" ] && [ "$want" -gt 0 ] && [ "$played" -ne "$want" ]; then
+        bad="the line is $played plies, the opening value said $want"
+      fi
+      # A DRAWN root used to be the one answer this section accepted without
+      # asking anything: the walk above never runs, the length test is skipped
+      # because $want is zero, and the configuration was counted as checked.  A
+      # reader that returns zero for every position therefore passed §22
+      # outright -- and one did, for ten configurations, because it indexed a
+      # D4-reduced table with the unreduced codec and read off the end of the
+      # array.  A draw is a claim like any other: if the best move wins for the
+      # side to move, the position was not drawn.  The move list is ordered
+      # best first, so the first move is the whole test.
+      if [ -z "$bad" ] && [ "$kind0" = "draw" ]; then
+        mk0=$(echo "$j0" | nthstr 2 kind)
+        winner=white
+        [ "$stm0" = "b" ] && winner=black
+        if [ -n "$mk0" ] && [ "$mk0" = "$winner" ]; then
+          bad="a drawn root whose best move wins for the side to move"
+        fi
+      fi
+      if [ -n "$bad" ]; then say "   $f: $bad"; fail=1; else checked=$((checked + 1)); fi
+    done
+    [ "$checked" = "$nfam" ] \
+      && say "   all $checked configurations descend one ply per best move         ok" \
+      || { say "   ONLY $checked OF $nfam CONFIGURATIONS CHECKED OUT"; fail=1; }
+
+    # A position of the wrong material must be refused rather than misread.
+    curl -s "$api/position?family=kqk&n=8&pos=wKa1,wQb2,wRc3,bKf5&stm=w" 2>/dev/null \
+      | grep -q '"error"' \
+      && say "   a position with a man too many is refused                      ok" \
+      || { say "   A WRONG-MATERIAL POSITION WAS ACCEPTED"; fail=1; }
+  fi
+  kill $serve_pid 2>/dev/null || true
+  wait $serve_pid 2>/dev/null || true
+fi
+
+say ""
+say "== 23. the explorer's table store: solve once, load thereafter =="
+say "   (serve --tables DIR loads the file for a configuration when it is"
+say "    there and solves and writes it when it is not.  What has to hold is"
+say "    that the two paths are indistinguishable: the same opening position,"
+say "    the same value and the same move list, whether the answer was computed"
+say "    or read back.  A store that returns anything else is worse than none.)"
+if ! command -v curl >/dev/null 2>&1; then
+  say "   curl not found -- section skipped"
+else
+  store="$TMP/store"
+  mkdir -p "$store"
+  # --save-over 0 writes every table, however cheap, so that one small board
+  # exercises the whole round trip rather than only the slow configurations.
+  for pass in cold warm; do
+    $EGTB serve --port 0 --root web --tables "$store" --save-over 0 \
+        > "$TMP/store-$pass.out" 2>&1 &
+    sp=$!
+    port=""
+    i=0
+    while [ $i -lt 200 ]; do
+      port=$(sed -n 's|.*127\.0\.0\.1:\([0-9][0-9]*\)/.*|\1|p' "$TMP/store-$pass.out" 2>/dev/null | head -1)
+      [ -n "$port" ] && break
+      i=$((i + 1))
+      awk 'BEGIN{for(k=0;k<300000;k++);}' </dev/null
+    done
+    if [ -z "$port" ]; then say "   SERVER DID NOT START ($pass)"; fail=1; break; fi
+    : > "$TMP/store-$pass.txt"
+    seen=0
+    for f in $(curl -s "http://127.0.0.1:$port/api/families" | grep -o '"id":"[^"]*"' | cut -d'"' -f4); do
+      # n = 5 for every configuration that reaches it, so the pass is quick and
+      # still covers all seven table types.
+      j=$(curl -s "http://127.0.0.1:$port/api/position?family=$f&n=5")
+      case "$j" in *'"error"'*) continue ;; esac
+      [ -n "$j" ] || continue
+      printf '%s %s\n' "$f" "$(echo "$j" | grep -o '"pos":"[^"]*"' | sed -n 1p)$(echo "$j" | grep -o '"text":"[^"]*"' | sed -n 1p)$(echo "$j" | grep -c '"san"')" \
+        >> "$TMP/store-$pass.txt"
+      seen=$((seen + 1))
+    done
+    kill $sp 2>/dev/null || true
+    wait $sp 2>/dev/null || true
+    eval "${pass}_seen=$seen"
+    say "   $pass pass: $seen configurations answered on 5 x 5"
+  done
+
+  [ "${cold_seen:-0}" -ge 15 ] \
+    && say "   the cold pass covered ${cold_seen} configurations                       ok" \
+    || { say "   COLD PASS COVERED ONLY ${cold_seen:-0} CONFIGURATIONS"; fail=1; }
+  [ "${cold_seen:-0}" = "${warm_seen:-1}" ] \
+    && say "   the warm pass covered the same ${warm_seen} configurations                ok" \
+    || { say "   WARM PASS COVERED ${warm_seen:-0}, COLD ${cold_seen:-0}"; fail=1; }
+
+  # Something must actually have been written, or the warm pass proved nothing.
+  nfiles=$(ls -1 "$store" 2>/dev/null | grep -c .)
+  [ "$nfiles" -gt 0 ] \
+    && say "   the cold pass left $nfiles files in the store                       ok" \
+    || { say "   THE STORE IS EMPTY: NOTHING WAS WRITTEN"; fail=1; }
+  grep -q "loaded " "$TMP/store-warm.out" \
+    && say "   the warm pass reported loading tables rather than solving      ok" \
+    || { say "   THE WARM PASS NEVER LOADED ANYTHING"; fail=1; }
+
+  if cmp -s "$TMP/store-cold.txt" "$TMP/store-warm.txt"; then
+    say "   every answer is identical whether solved or loaded             ok"
+  else
+    say "   SOLVED AND LOADED ANSWERS DIFFER:"
+    diff "$TMP/store-cold.txt" "$TMP/store-warm.txt" | head -10
+    fail=1
+  fi
+
+  # A corrupt file must be a miss, not a wrong board.
+  victim=$(ls -1 "$store"/*.kqk 2>/dev/null | head -1)
+  if [ -n "$victim" ]; then
+    printf 'rubbish' > "$victim"
+    $EGTB serve --port 0 --root web --tables "$store" --read-only \
+        > "$TMP/store-bad.out" 2>&1 &
+    sp=$!
+    port=""
+    i=0
+    while [ $i -lt 200 ]; do
+      port=$(sed -n 's|.*127\.0\.0\.1:\([0-9][0-9]*\)/.*|\1|p' "$TMP/store-bad.out" 2>/dev/null | head -1)
+      [ -n "$port" ] && break
+      i=$((i + 1))
+      awk 'BEGIN{for(k=0;k<300000;k++);}' </dev/null
+    done
+    got=$(curl -s "http://127.0.0.1:$port/api/position?family=kqk&n=5" | grep -o '"text":"[^"]*"' | sed -n 1p)
+    want=$(grep '^kqk ' "$TMP/store-cold.txt" | head -1)
+    kill $sp 2>/dev/null || true
+    wait $sp 2>/dev/null || true
+    case "$want" in
+      *"$got"*) say "   a corrupt file is a miss: the same answer, solved instead    ok" ;;
+      *) say "   A CORRUPT FILE CHANGED THE ANSWER: got $got"; fail=1 ;;
+    esac
+  else
+    say "   NO KQK FILE TO CORRUPT -- THE STORE DID NOT WRITE ONE"; fail=1
+  fi
+fi
+
+say ""
+say "== 24. colour symmetry: a reversed-colour table is the same table =="
+say "   (Under capture rules both sides move and win identically, so reversing"
+say "    the colours is an exact symmetry: W vs BB with White to move IS BB vs W"
+say "    with Black to move, wins and losses swapped.  Nothing in the solver is"
+say "    told this, so it is an independent check -- unlike Bellman, which is"
+say "    self-consistent against the same table and cannot see an index or a"
+say "    conversion that is wrong the same way in both halves.)"
+
+# positions wWin wDraw wLoss bWin bDraw bLoss deepestW deepestB, from one census.
+census9() {
+  $EGTB kings --white "$1" --black "$2" --wp "$3" --bp "$4" -n "$5" 2>/dev/null | awk '
+    $3 == "wtm" { pos=$2; ww=$4; wd=$5; wl=$6; dw=$7 }
+    $1 == "btm" { bw=$2; bd=$3; bl=$4; db=$5 }
+    END { print pos, ww, wd, wl, bw, bd, bl, dw, db }'
+}
+
+for n in 5 6 7; do
+  for pair in "king king" "king knight" "knight king" "knight knight"; do
+    wp=${pair%% *}; bp=${pair##* }
+    a=$(census9 1 2 "$wp" "$bp" "$n")     # X vs YY
+    b=$(census9 2 1 "$bp" "$wp" "$n")     # YY vs X
+    set -- $a; apos=$1; aww=$2; awd=$3; awl=$4; abw=$5; abd=$6; abl=$7; adw=$8; adb=$9
+    set -- $b; bpos=$1; bww=$2; bwd=$3; bwl=$4; bbw=$5; bbd=$6; bbl=$7; bdw=$8; bdb=$9
+    if [ -z "$apos" ] || [ -z "$bpos" ]; then
+      say "   n=$n $wp/$bp  NO CENSUS"; fail=1; continue
+    fi
+    # A white-to-move is B black-to-move with win and loss exchanged.
+    if [ "$apos" = "$bpos" ] && [ "$aww" = "$bbl" ] && [ "$awd" = "$bbd" ] && [ "$awl" = "$bbw" ] \
+       && [ "$abw" = "$bwl" ] && [ "$abd" = "$bwd" ] && [ "$abl" = "$bww" ] \
+       && [ "$adw" = "$bdb" ] && [ "$adb" = "$bdw" ]; then
+      say "   n=$n  $wp vs $bp: reversed colours agree                 ok"
+    else
+      say "   n=$n  $wp vs $bp: COLOUR REVERSAL DISAGREES"
+      say "      X vs YY : $a"
+      say "      YY vs X : $b"
+      fail=1
+    fi
+  done
+done
+
+
+say ""
+say "== 25. mixed.cpp plays the same game as the general solver =="
+say "   (mixed.cpp is the unreduced capture solver for two white men against"
+say "    one black man, and until now nothing in this file mentioned it at"
+say "    all.  Two rule bugs lived in it because of that.  It first converted"
+say "    every capture into the surviving man's table, which made ...KxK a won"
+say "    piece rather than the end of the game; the repair for that then asked"
+say "    only whether the captured man was a king, and so ended the game on the"
+say "    FIRST of two -- a side with a king left is not beaten.  The general"
+say "    solver answers the same material through a different index and a"
+say "    different induction, so comparing the two over every shape is a check"
+say "    neither bug could have survived.  Fifteen white pairs by five black"
+say "    men is seventy-five shapes, and the count is asserted so that a loop"
+say "    which quietly runs none of them fails instead of passing.)"
+mixrank() {
+  case $1 in king) echo 1 ;; queen) echo 2 ;; rook) echo 3 ;;
+             bishop) echo 4 ;; knight) echo 5 ;; esac
+}
+mixpieces="king queen rook bishop knight"
+mixran=0; mixtried=0
+for a in $mixpieces; do
+  for b in $mixpieces; do
+    # The white pair is a multiset, so keep one ordering of each pair.
+    [ "$(mixrank $a)" -gt "$(mixrank $b)" ] && continue
+    for c in $mixpieces; do
+      mixtried=$((mixtried + 1))
+      out=$(./egtb gencap --w1 "$a" --w2 "$b" --bp "$c" -n 4 --quiet 2>&1 | tail -1)
+      case "$out" in
+        *"0 disagreements"*) mixran=$((mixran + 1)) ;;
+        *) say "   $a + $b vs $c: ${out:-no answer}"; fail=1 ;;
+      esac
+    done
+  done
+done
+if [ "$mixtried" = 75 ] && [ "$mixran" = 75 ]; then
+  say "   all 75 shapes agree with the general solver on 4 x 4          ok"
+else
+  say "   ONLY $mixran OF $mixtried SHAPES AGREED (75 were expected)"; fail=1
+fi
+
+say ""
 [ $fail = 0 ] && say "ALL TESTS PASSED" || say "FAILURES PRESENT"
 exit $fail

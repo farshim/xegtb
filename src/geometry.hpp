@@ -125,36 +125,178 @@ constexpr int MAXWP = 3;
 // neither the index codec nor the block layout; see indexbb.hpp.
 // ---------------------------------------------------------------------------
 enum class Endgame : uint8_t { KQK = 0, KRK = 1, KBBK = 2, KBNK = 3, KQKR = 4,
-                               KNNK = 5, KNNNK = 6, KNK = 7, KBK = 8, KQKB = 9 };
-constexpr int NUM_ENDGAMES = 10;
+                               KNNK = 5, KNNNK = 6, KNK = 7, KBK = 8, KQKB = 9,
+                               // One white man against one black man, the rest
+                               // of the sixteen.  KQKR and KQKB came first
+                               // because KQKBB needed them; these complete the
+                               // set, and between them and the colour mirror
+                               // they answer every four-man endgame in which
+                               // both sides are armed.  Ordered so that the
+                               // white man is never weaker than the black one:
+                               // the other ordering is the same table read
+                               // from the other side.
+                               KQKQ = 10, KQKN = 11, KRKR = 12, KRKB = 13,
+                               KRKN = 14, KBKB = 15, KBKN = 16, KNKN = 17,
+                               // Two white men against a bare black king, the
+                               // seven the shared solver did not have.  KBBK,
+                               // KBNK and KNNK were the three whose captures
+                               // leave material that cannot mate; these seven
+                               // all leave material that can, so every one of
+                               // them converts under both rule sets.
+                               KQQK = 18, KQRK = 19, KQBK = 20, KQNK = 21,
+                               KRRK = 22, KRBK = 23, KRNK = 24,
+                               // Three white men against a bare black king.
+                               // KNNNK was the only one the index could hold,
+                               // because three alike are an unordered triple
+                               // and nothing else fitted; these nineteen are
+                               // the rest of the multiset.
+                               KQQQK = 25,
+                               KQQRK = 26,
+                               KQQBK = 27,
+                               KQQNK = 28,
+                               KQRRK = 29,
+                               KQRBK = 30,
+                               KQRNK = 31,
+                               KQBBK = 32,
+                               KQBNK = 33,
+                               KQNNK = 34,
+                               KRRRK = 35,
+                               KRRBK = 36,
+                               KRRNK = 37,
+                               KRBBK = 38,
+                               KRBNK = 39,
+                               KRNNK = 40,
+                               KBBBK = 41,
+                               KBBNK = 42,
+                               KBNNK = 43 };
+constexpr int NUM_ENDGAMES = 44;
 
-// Does Black have a man besides the king?  Only KQKR and KQKB do, and only the
-// solver in kqkr.cpp may be used on such an endgame.
-constexpr bool blackArmed(Endgame e) {
-    return e == Endgame::KQKR || e == Endgame::KQKB;
+// How White's men have to be encoded -- what the index must tell apart.  Two
+// men of the same type and colour are interchangeable and their configuration
+// is a SET; two of different types are not and it is a sequence.  With three
+// men there are three cases rather than two, and the middle one -- a pair and
+// an odd man -- is the one that did not exist before.
+enum class CfgShape : uint8_t {
+    One,             // one man: the square
+    PairOrdered,     // two unlike: an ordered pair
+    PairUnordered,   // two alike: an unordered pair
+    TripleAlike,     // three alike: an unordered triple
+    TriplePairOdd,   // two alike in slots 0 and 1, a third man in slot 2
+    TripleOrdered,   // three unlike: an ordered triple
+};
+
+// The three-man materials, in the order the index wants them: for a pair and
+// an odd man, the pair first, so that sorting the first two normalises the
+// configuration and the third is left alone.
+struct ThreeMan { Piece a, b, c; CfgShape shape; };
+constexpr ThreeMan THREE_MAN[] = {
+    { Piece::Queen, Piece::Queen, Piece::Queen,   CfgShape::TripleAlike     },  // KQQQK
+    { Piece::Queen, Piece::Queen, Piece::Rook,    CfgShape::TriplePairOdd   },  // KQQRK
+    { Piece::Queen, Piece::Queen, Piece::Bishop,  CfgShape::TriplePairOdd   },  // KQQBK
+    { Piece::Queen, Piece::Queen, Piece::Knight,  CfgShape::TriplePairOdd   },  // KQQNK
+    { Piece::Rook,  Piece::Rook,  Piece::Queen,   CfgShape::TriplePairOdd   },  // KQRRK
+    { Piece::Queen, Piece::Rook,  Piece::Bishop,  CfgShape::TripleOrdered   },  // KQRBK
+    { Piece::Queen, Piece::Rook,  Piece::Knight,  CfgShape::TripleOrdered   },  // KQRNK
+    { Piece::Bishop, Piece::Bishop, Piece::Queen,   CfgShape::TriplePairOdd   },  // KQBBK
+    { Piece::Queen, Piece::Bishop, Piece::Knight,  CfgShape::TripleOrdered   },  // KQBNK
+    { Piece::Knight, Piece::Knight, Piece::Queen,   CfgShape::TriplePairOdd   },  // KQNNK
+    { Piece::Rook,  Piece::Rook,  Piece::Rook,    CfgShape::TripleAlike     },  // KRRRK
+    { Piece::Rook,  Piece::Rook,  Piece::Bishop,  CfgShape::TriplePairOdd   },  // KRRBK
+    { Piece::Rook,  Piece::Rook,  Piece::Knight,  CfgShape::TriplePairOdd   },  // KRRNK
+    { Piece::Bishop, Piece::Bishop, Piece::Rook,    CfgShape::TriplePairOdd   },  // KRBBK
+    { Piece::Rook,  Piece::Bishop, Piece::Knight,  CfgShape::TripleOrdered   },  // KRBNK
+    { Piece::Knight, Piece::Knight, Piece::Rook,    CfgShape::TriplePairOdd   },  // KRNNK
+    { Piece::Bishop, Piece::Bishop, Piece::Bishop,  CfgShape::TripleAlike     },  // KBBBK
+    { Piece::Bishop, Piece::Bishop, Piece::Knight,  CfgShape::TriplePairOdd   },  // KBBNK
+    { Piece::Knight, Piece::Knight, Piece::Bishop,  CfgShape::TriplePairOdd   },  // KBNNK
+};
+constexpr int THREE_MAN_FIRST = 25;   // the enum value THREE_MAN[0] describes
+constexpr bool isThreeMan(Endgame e) {
+    return (int)e >= THREE_MAN_FIRST && (int)e < THREE_MAN_FIRST + 19;
 }
-// Black's man, for those two.  Meaningless for anything else.
+
+// Does Black have a man besides the king?  Only the one-against-one endgames
+// do, and only the solver in kqkr.cpp may be used on them.
+constexpr bool blackArmed(Endgame e) {
+    return e == Endgame::KQKR || e == Endgame::KQKB || e == Endgame::KQKQ ||
+           e == Endgame::KQKN || e == Endgame::KRKR || e == Endgame::KRKB ||
+           e == Endgame::KRKN || e == Endgame::KBKB || e == Endgame::KBKN ||
+           e == Endgame::KNKN;
+}
+// Black's man, for those.  Meaningless for anything else.
 constexpr Piece blackPieceOf(Endgame e) {
-    return e == Endgame::KQKB ? Piece::Bishop : Piece::Rook;
+    return e == Endgame::KQKB || e == Endgame::KRKB || e == Endgame::KBKB ? Piece::Bishop
+         : e == Endgame::KQKN || e == Endgame::KRKN || e == Endgame::KBKN ||
+           e == Endgame::KNKN ? Piece::Knight
+         : e == Endgame::KQKQ ? Piece::Queen
+                              : Piece::Rook;
+}
+// White's man, for those.  For everything else pieceOf(e, 0) says it too; this
+// exists so the armed solver can ask without knowing the shape.
+constexpr Piece whitePieceOf(Endgame e) {
+    return e == Endgame::KRKR || e == Endgame::KRKB || e == Endgame::KRKN ? Piece::Rook
+         : e == Endgame::KBKB || e == Endgame::KBKN ? Piece::Bishop
+         : e == Endgame::KNKN ? Piece::Knight
+                              : Piece::Queen;
+}
+// The endgame a capture leaves: one man and two kings, which the shared
+// solver already has for every piece.
+// The endgame of TWO white men against a bare king, for any pair of pieces.
+// A three-man endgame converts into one of these when a man is taken, and
+// there are exactly ten of them.
+constexpr Endgame twoManEndgame(Piece a, Piece b) {
+    // Ordered so that the comparison below is a small decision tree rather
+    // than a table: queen, rook, bishop, knight.
+    const Piece hi = (int)a <= (int)b ? a : b;
+    const Piece lo = (int)a <= (int)b ? b : a;
+    return hi == Piece::Queen
+             ? (lo == Piece::Queen ? Endgame::KQQK : lo == Piece::Rook ? Endgame::KQRK
+              : lo == Piece::Bishop ? Endgame::KQBK : Endgame::KQNK)
+         : hi == Piece::Rook
+             ? (lo == Piece::Rook ? Endgame::KRRK : lo == Piece::Bishop ? Endgame::KRBK
+                                                                        : Endgame::KRNK)
+         : hi == Piece::Bishop
+             ? (lo == Piece::Bishop ? Endgame::KBBK : Endgame::KBNK)
+                                    : Endgame::KNNK;
+}
+
+constexpr Endgame bareEndgameOf(Piece p) {
+    return p == Piece::Rook ? Endgame::KRK
+         : p == Piece::Bishop ? Endgame::KBK
+         : p == Piece::Knight ? Endgame::KNK
+                              : Endgame::KQK;
 }
 
 // Compile-time views of an endgame.  The solver, the index codec and the move
 // generator are all templated on the Endgame and read these, so the piece
 // count, the ray sets and the attack tests fold away to constants.
 constexpr int npOf(Endgame e) {
-    return e == Endgame::KNNNK ? 3
-         : (e == Endgame::KBBK || e == Endgame::KBNK || e == Endgame::KQKR ||
-            e == Endgame::KQKB || e == Endgame::KNNK) ? 2 : 1;
+    return isThreeMan(e) ? 3
+         : e == Endgame::KNNNK ? 3
+         : (e == Endgame::KBBK || e == Endgame::KBNK || e == Endgame::KNNK ||
+            e == Endgame::KQQK || e == Endgame::KQRK || e == Endgame::KQBK ||
+            e == Endgame::KQNK || e == Endgame::KRRK || e == Endgame::KRBK ||
+            e == Endgame::KRNK || blackArmed(e)) ? 2 : 1;
 }
 // For KQKR this reports the queen and the rook in that order; the rook is
 // Black's, which only the KQKR solver needs to know.  The index does not: it
 // asks solely for the count and for whether the two are interchangeable.
 constexpr Piece pieceOf(Endgame e, int i = 0) {
-    return e == Endgame::KRK   ? Piece::Rook
+    return isThreeMan(e)
+             ? (i == 0 ? THREE_MAN[(int)e - THREE_MAN_FIRST].a
+              : i == 1 ? THREE_MAN[(int)e - THREE_MAN_FIRST].b
+                       : THREE_MAN[(int)e - THREE_MAN_FIRST].c)
+         : e == Endgame::KQQK  ? Piece::Queen
+         : e == Endgame::KQRK  ? (i == 0 ? Piece::Queen : Piece::Rook)
+         : e == Endgame::KQBK  ? (i == 0 ? Piece::Queen : Piece::Bishop)
+         : e == Endgame::KQNK  ? (i == 0 ? Piece::Queen : Piece::Knight)
+         : e == Endgame::KRRK  ? Piece::Rook
+         : e == Endgame::KRBK  ? (i == 0 ? Piece::Rook  : Piece::Bishop)
+         : e == Endgame::KRNK  ? (i == 0 ? Piece::Rook  : Piece::Knight)
+         : blackArmed(e)       ? (i == 0 ? whitePieceOf(e) : blackPieceOf(e))
+         : e == Endgame::KRK   ? Piece::Rook
          : e == Endgame::KBBK  ? Piece::Bishop
          : e == Endgame::KBNK  ? (i == 0 ? Piece::Bishop : Piece::Knight)
-         : e == Endgame::KQKR  ? (i == 0 ? Piece::Queen  : Piece::Rook)
-         : e == Endgame::KQKB  ? (i == 0 ? Piece::Queen  : Piece::Bishop)
          : e == Endgame::KNNK  ? Piece::Knight
          : e == Endgame::KNNNK ? Piece::Knight
          : e == Endgame::KNK   ? Piece::Knight
@@ -164,7 +306,21 @@ constexpr Piece pieceOf(Endgame e, int i = 0) {
 // Are White's two pieces interchangeable?  If they are, a configuration is an
 // unordered pair and half the table disappears; if not, it is an ordered one.
 constexpr bool identicalOf(Endgame e) {
-    return e == Endgame::KBBK || e == Endgame::KNNK || e == Endgame::KNNNK;
+    // KRKR has two rooks and they are NOT interchangeable: one is White's and
+    // one is Black's, and swapping them is a different position.  Only two men
+    // of the same colour and type collapse into an unordered pair.
+    return e == Endgame::KBBK || e == Endgame::KNNK || e == Endgame::KNNNK ||
+           e == Endgame::KQQK || e == Endgame::KRRK ||
+           // three alike, the rest of them
+           e == Endgame::KQQQK || e == Endgame::KRRRK || e == Endgame::KBBBK;
+}
+
+constexpr CfgShape cfgShapeOf(Endgame e) {
+    return isThreeMan(e)        ? THREE_MAN[(int)e - THREE_MAN_FIRST].shape
+         : npOf(e) == 1         ? CfgShape::One
+         : npOf(e) == 3         ? CfgShape::TripleAlike        // KNNNK
+         : identicalOf(e)       ? CfgShape::PairUnordered
+                                : CfgShape::PairOrdered;
 }
 
 // Dispatch a call over the endgames, so one templated body serves them all.
@@ -179,6 +335,40 @@ constexpr bool identicalOf(Endgame e) {
         case Endgame::KNK:  return CALL(Endgame::KNK);  \
         case Endgame::KBK:  return CALL(Endgame::KBK);  \
         case Endgame::KQKB: return CALL(Endgame::KQKB); \
+        case Endgame::KQKQ: return CALL(Endgame::KQKQ); \
+        case Endgame::KQKN: return CALL(Endgame::KQKN); \
+        case Endgame::KRKR: return CALL(Endgame::KRKR); \
+        case Endgame::KRKB: return CALL(Endgame::KRKB); \
+        case Endgame::KRKN: return CALL(Endgame::KRKN); \
+        case Endgame::KBKB: return CALL(Endgame::KBKB); \
+        case Endgame::KBKN: return CALL(Endgame::KBKN); \
+        case Endgame::KNKN: return CALL(Endgame::KNKN); \
+        case Endgame::KQQK: return CALL(Endgame::KQQK); \
+        case Endgame::KQRK: return CALL(Endgame::KQRK); \
+        case Endgame::KQBK: return CALL(Endgame::KQBK); \
+        case Endgame::KQNK: return CALL(Endgame::KQNK); \
+        case Endgame::KRRK: return CALL(Endgame::KRRK); \
+        case Endgame::KRBK: return CALL(Endgame::KRBK); \
+        case Endgame::KRNK: return CALL(Endgame::KRNK); \
+        case Endgame::KQQQK: return CALL(Endgame::KQQQK); \
+        case Endgame::KQQRK: return CALL(Endgame::KQQRK); \
+        case Endgame::KQQBK: return CALL(Endgame::KQQBK); \
+        case Endgame::KQQNK: return CALL(Endgame::KQQNK); \
+        case Endgame::KQRRK: return CALL(Endgame::KQRRK); \
+        case Endgame::KQRBK: return CALL(Endgame::KQRBK); \
+        case Endgame::KQRNK: return CALL(Endgame::KQRNK); \
+        case Endgame::KQBBK: return CALL(Endgame::KQBBK); \
+        case Endgame::KQBNK: return CALL(Endgame::KQBNK); \
+        case Endgame::KQNNK: return CALL(Endgame::KQNNK); \
+        case Endgame::KRRRK: return CALL(Endgame::KRRRK); \
+        case Endgame::KRRBK: return CALL(Endgame::KRRBK); \
+        case Endgame::KRRNK: return CALL(Endgame::KRRNK); \
+        case Endgame::KRBBK: return CALL(Endgame::KRBBK); \
+        case Endgame::KRBNK: return CALL(Endgame::KRBNK); \
+        case Endgame::KRNNK: return CALL(Endgame::KRNNK); \
+        case Endgame::KBBBK: return CALL(Endgame::KBBBK); \
+        case Endgame::KBBNK: return CALL(Endgame::KBBNK); \
+        case Endgame::KBNNK: return CALL(Endgame::KBNNK); \
         default:            return CALL(Endgame::KQKR); \
     }
 
@@ -204,6 +394,40 @@ struct Material {
             case Endgame::KBNK: return "KBNK";
             case Endgame::KQKR: return "KQKR";
             case Endgame::KQKB: return "KQKB";
+            case Endgame::KQKQ: return "KQKQ";
+            case Endgame::KQKN: return "KQKN";
+            case Endgame::KRKR: return "KRKR";
+            case Endgame::KRKB: return "KRKB";
+            case Endgame::KRKN: return "KRKN";
+            case Endgame::KBKB: return "KBKB";
+            case Endgame::KBKN: return "KBKN";
+            case Endgame::KNKN: return "KNKN";
+            case Endgame::KQQK: return "KQQK";
+            case Endgame::KQRK: return "KQRK";
+            case Endgame::KQBK: return "KQBK";
+            case Endgame::KQNK: return "KQNK";
+            case Endgame::KRRK: return "KRRK";
+            case Endgame::KRBK: return "KRBK";
+            case Endgame::KRNK: return "KRNK";
+            case Endgame::KQQQK: return "KQQQK";
+            case Endgame::KQQRK: return "KQQRK";
+            case Endgame::KQQBK: return "KQQBK";
+            case Endgame::KQQNK: return "KQQNK";
+            case Endgame::KQRRK: return "KQRRK";
+            case Endgame::KQRBK: return "KQRBK";
+            case Endgame::KQRNK: return "KQRNK";
+            case Endgame::KQBBK: return "KQBBK";
+            case Endgame::KQBNK: return "KQBNK";
+            case Endgame::KQNNK: return "KQNNK";
+            case Endgame::KRRRK: return "KRRRK";
+            case Endgame::KRRBK: return "KRRBK";
+            case Endgame::KRRNK: return "KRRNK";
+            case Endgame::KRBBK: return "KRBBK";
+            case Endgame::KRBNK: return "KRBNK";
+            case Endgame::KRNNK: return "KRNNK";
+            case Endgame::KBBBK: return "KBBBK";
+            case Endgame::KBBNK: return "KBBNK";
+            case Endgame::KBNNK: return "KBNNK";
             case Endgame::KNNK: return "KNNK";
             case Endgame::KNNNK:return "KNNNK";
             case Endgame::KNK:  return "KNK";
@@ -218,6 +442,40 @@ struct Material {
             case Endgame::KBNK: return "white has a bishop and a knight";
             case Endgame::KQKR: return "white has a queen, black a rook";
             case Endgame::KQKB: return "white has a queen, black a bishop";
+            case Endgame::KQKQ: return "white has a queen, black a queen";
+            case Endgame::KQKN: return "white has a queen, black a knight";
+            case Endgame::KRKR: return "white has a rook, black a rook";
+            case Endgame::KRKB: return "white has a rook, black a bishop";
+            case Endgame::KRKN: return "white has a rook, black a knight";
+            case Endgame::KBKB: return "white has a bishop, black a bishop";
+            case Endgame::KBKN: return "white has a bishop, black a knight";
+            case Endgame::KNKN: return "white has a knight, black a knight";
+            case Endgame::KQQK: return "white has two queens";
+            case Endgame::KQRK: return "white has a queen and a rook";
+            case Endgame::KQBK: return "white has a queen and a bishop";
+            case Endgame::KQNK: return "white has a queen and a knight";
+            case Endgame::KRRK: return "white has two rooks";
+            case Endgame::KRBK: return "white has a rook and a bishop";
+            case Endgame::KRNK: return "white has a rook and a knight";
+            case Endgame::KQQQK: return "white has three queens";
+            case Endgame::KQQRK: return "white has two queens and a rook";
+            case Endgame::KQQBK: return "white has two queens and a bishop";
+            case Endgame::KQQNK: return "white has two queens and a knight";
+            case Endgame::KQRRK: return "white has a queen and two rooks";
+            case Endgame::KQRBK: return "white has a queen and a rook and a bishop";
+            case Endgame::KQRNK: return "white has a queen and a rook and a knight";
+            case Endgame::KQBBK: return "white has a queen and two bishops";
+            case Endgame::KQBNK: return "white has a queen and a bishop and a knight";
+            case Endgame::KQNNK: return "white has a queen and two knights";
+            case Endgame::KRRRK: return "white has three rooks";
+            case Endgame::KRRBK: return "white has two rooks and a bishop";
+            case Endgame::KRRNK: return "white has two rooks and a knight";
+            case Endgame::KRBBK: return "white has a rook and two bishops";
+            case Endgame::KRBNK: return "white has a rook and a bishop and a knight";
+            case Endgame::KRNNK: return "white has a rook and two knights";
+            case Endgame::KBBBK: return "white has three bishops";
+            case Endgame::KBBNK: return "white has two bishops and a knight";
+            case Endgame::KBNNK: return "white has a bishop and two knights";
             case Endgame::KNNK: return "white has two knights";
             case Endgame::KNNNK:return "white has three knights";
             case Endgame::KNK:  return "white has a knight";
@@ -249,6 +507,40 @@ inline bool parseEndgame(const std::string& t, Endgame& out) {
     if (v == "kbk"  || v == "b")                    { out = Endgame::KBK;  return true; }
     if (v == "kqkr" || v == "qr")                   { out = Endgame::KQKR; return true; }
     if (v == "kqkb" || v == "qb")                   { out = Endgame::KQKB; return true; }
+    if (v == "kqkq" || v == "qq")                   { out = Endgame::KQKQ; return true; }
+    if (v == "kqkn" || v == "qn")                   { out = Endgame::KQKN; return true; }
+    if (v == "krkr" || v == "rr")                   { out = Endgame::KRKR; return true; }
+    if (v == "krkb" || v == "rb")                   { out = Endgame::KRKB; return true; }
+    if (v == "krkn" || v == "rn")                   { out = Endgame::KRKN; return true; }
+    if (v == "kbkb" || v == "bb2")                  { out = Endgame::KBKB; return true; }
+    if (v == "kbkn" || v == "bn2")                  { out = Endgame::KBKN; return true; }
+    if (v == "knkn" || v == "nn2")                  { out = Endgame::KNKN; return true; }
+    if (v == "kqqk" || v == "qq2")                  { out = Endgame::KQQK; return true; }
+    if (v == "kqrk" || v == "qr2")                  { out = Endgame::KQRK; return true; }
+    if (v == "kqbk" || v == "qb2")                  { out = Endgame::KQBK; return true; }
+    if (v == "kqnk" || v == "qn2")                  { out = Endgame::KQNK; return true; }
+    if (v == "krrk" || v == "rr2")                  { out = Endgame::KRRK; return true; }
+    if (v == "krbk" || v == "rb2")                  { out = Endgame::KRBK; return true; }
+    if (v == "krnk" || v == "rn2")                  { out = Endgame::KRNK; return true; }
+    if (v == "kqqqk") { out = Endgame::KQQQK; return true; }
+    if (v == "kqqrk") { out = Endgame::KQQRK; return true; }
+    if (v == "kqqbk") { out = Endgame::KQQBK; return true; }
+    if (v == "kqqnk") { out = Endgame::KQQNK; return true; }
+    if (v == "kqrrk") { out = Endgame::KQRRK; return true; }
+    if (v == "kqrbk") { out = Endgame::KQRBK; return true; }
+    if (v == "kqrnk") { out = Endgame::KQRNK; return true; }
+    if (v == "kqbbk") { out = Endgame::KQBBK; return true; }
+    if (v == "kqbnk") { out = Endgame::KQBNK; return true; }
+    if (v == "kqnnk") { out = Endgame::KQNNK; return true; }
+    if (v == "krrrk") { out = Endgame::KRRRK; return true; }
+    if (v == "krrbk") { out = Endgame::KRRBK; return true; }
+    if (v == "krrnk") { out = Endgame::KRRNK; return true; }
+    if (v == "krbbk") { out = Endgame::KRBBK; return true; }
+    if (v == "krbnk") { out = Endgame::KRBNK; return true; }
+    if (v == "krnnk") { out = Endgame::KRNNK; return true; }
+    if (v == "kbbbk") { out = Endgame::KBBBK; return true; }
+    if (v == "kbbnk") { out = Endgame::KBBNK; return true; }
+    if (v == "kbnnk") { out = Endgame::KBNNK; return true; }
     return false;
 }
 

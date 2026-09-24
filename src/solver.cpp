@@ -102,10 +102,13 @@ template <Endgame EG>
 inline bool cfgAttacks(const Geometry& g, Sq wk, const Sq* cfg, Sq t) {
     if constexpr (npOf(EG) == 1) return g.attacks(pieceOf(EG, 0), cfg[0], t, wk);
     else if constexpr (npOf(EG) == 3) {
-        // All three are knights, so no blocker argument is read; see the note
-        // on attackedByPieceT in movegen.hpp.
-        for (int i = 0; i < 3; ++i)
-            if (g.attacks(pieceOf(EG, i), cfg[i], t, wk)) return true;
+        // Each man's ray is blocked by the other two and by the king.  While
+        // the only three-man endgame was KNNNK this loop passed the king
+        // alone, because a knight is not blocked by anything; a queen is.
+        for (int i = 0; i < 3; ++i) {
+            const int j = (i + 1) % 3, k = (i + 2) % 3;
+            if (g.attacks(pieceOf(EG, i), cfg[i], t, wk, cfg[j], cfg[k])) return true;
+        }
         return false;
     }
     else return g.attacks(pieceOf(EG, 0), cfg[0], t, wk, cfg[1]) ||
@@ -141,8 +144,13 @@ inline bool cfgDefends(const Geometry& g, Sq wk, const Sq* cfg, int captured, Sq
     if constexpr (npOf(EG) == 1) { (void)g; (void)wk; (void)cfg; (void)captured; (void)s;
                                    return false; }
     else if constexpr (npOf(EG) == 3) {
-        for (int i = 0; i < 3; ++i)
-            if (i != captured && g.attacks(pieceOf(EG, i), cfg[i], s, wk)) return true;
+        for (int i = 0; i < 3; ++i) {
+            if (i == captured) continue;
+            const int o = 3 - i - captured;      // the man that is neither
+            // The captured man stands on `s` and so blocks nothing on the way
+            // to it; the third man does.
+            if (g.attacks(pieceOf(EG, i), cfg[i], s, wk, cfg[o])) return true;
+        }
         return false;
     }
     else return captured == 0 ? g.attacks(pieceOf(EG, 1), cfg[1], s, wk)
@@ -167,18 +175,43 @@ inline U8 captureValue(const Table& T, Sq wk, const Sq* cfg, int captured, Sq to
     // to V_DRAW at compile time and pays nothing -- including KBBK itself
     // under the ordinary rules, where T.sub is null and the branch below
     // returns V_DRAW at run time.
-    if constexpr (EG != Endgame::KNNNK && EG != Endgame::KNNK &&
-                  EG != Endgame::KBBK) {
+    // Which endgames convert: the three that always did, plus every endgame
+    // whose two white men can still mate after one of them is taken.  KBNK
+    // belongs in that list under the capture rules and was missing from it --
+    // ...KxB leaves K+N vs K and ...KxN leaves K+B vs K, and under those rules
+    // neither is a dead draw, so scoring both as draws was simply wrong.
+    // Which endgames convert: everything whose remaining men can still mate.
+    // With one white man that is nothing -- a bare king is left -- so those
+    // fold to a draw at compile time and pay nothing.
+    if constexpr (npOf(EG) == 1) {
         (void)T; (void)wk; (void)cfg; (void)captured; (void)to;
         return V_DRAW;
     } else {
-        if (!T.sub) return V_DRAW;
+        // Whichever man was taken, the table for what is left.
+        const Table* s = T.subFor[captured];
+        if (!s) return V_DRAW;
+        // The men that are left, in the order the *sub-table* names them, not
+        // the order this table names them.  A three-man endgame with a pair of
+        // alike men lists the pair first and the odd man last -- KQNNK is
+        // N,N,Q -- while the two-man tables are named in strength order --
+        // KQNK is Q,N.  Copying the leftovers across in this table's order
+        // therefore probes the sub-table with its two men exchanged, which is
+        // a different entry and usually an illegal one.  Match on piece type
+        // instead; with alike men either one will do, which is why the loop
+        // takes the first unused man of the right type.
         Pos q;
         q.wk = wk;
         q.bk = to;
+        Sq  left[MAXWP];
+        Piece lp[MAXWP];
         int k = 0;
-        for (int i = 0; i < npOf(EG); ++i) if (i != captured) q.wp[k++] = cfg[i];
-        return T.sub->valueAt(q, /*whiteToMove=*/true);
+        for (int i = 0; i < npOf(EG); ++i)
+            if (i != captured) { left[k] = cfg[i]; lp[k] = pieceOf(EG, i); ++k; }
+        bool used[MAXWP] = { false, false, false };
+        for (int j = 0; j < k; ++j)
+            for (int i = 0; i < k; ++i)
+                if (!used[i] && lp[i] == s->mat.piece[j]) { q.wp[j] = left[i]; used[i] = true; break; }
+        return s->valueAt(q, /*whiteToMove=*/true);
     }
 }
 
@@ -390,17 +423,16 @@ void generateImpl(Table& T, int threads, bool progress) {
                             }
                             return true;
                         };
-                        // Squares the piece could have come from.  forEachMove
-                        // takes three occupancies; with three knights the men
-                        // in the way are four, so the black king is excluded by
-                        // hand -- exact for a jumper, which cannot be blocked.
+                        // Squares the piece could have come from.  With three
+                        // men the occupancies are four -- both kings and the
+                        // other two -- and the black king has to be one of
+                        // them: for a slider he stops the ray, not just the
+                        // square.  Three knights did not care, which is why
+                        // this passed three and tested the king by hand.
                         if constexpr (NP == 3) {
-                            forEachMove<pieceOf(EG, I)>(g, cfg[I], wk,
+                            forEachMove<pieceOf(EG, I)>(g, cfg[I], wk, bk,
                                                         cfg[I == 0 ? 1 : 0],
-                                                        cfg[I == 2 ? 1 : 2],
-                                                        [&](Sq from) {
-                                return from == bk ? true : put(from);
-                            });
+                                                        cfg[I == 2 ? 1 : 2], put);
                         } else {
                             const Sq other = (NP == 2) ? cfg[1 - I] : Sq(-1);
                             forEachMove<pieceOf(EG, I)>(g, cfg[I], wk, bk, other, put);
@@ -598,6 +630,44 @@ void generateImpl(Table& T, int threads, bool progress) {
 
 } // namespace
 
+// One line per endgame is what the switch below would otherwise need for the
+// seven added together; this picks the template instantiation from the value.
+// The nineteen three-man materials, dispatched the same way.
+#define KQK_DISPATCH_THREE(eg)                                                  \
+    switch (eg) {                                                               \
+        case Endgame::KQQQK: generateImpl<Endgame::KQQQK>(*this, threads, progress); break; \
+        case Endgame::KQQRK: generateImpl<Endgame::KQQRK>(*this, threads, progress); break; \
+        case Endgame::KQQBK: generateImpl<Endgame::KQQBK>(*this, threads, progress); break; \
+        case Endgame::KQQNK: generateImpl<Endgame::KQQNK>(*this, threads, progress); break; \
+        case Endgame::KQRRK: generateImpl<Endgame::KQRRK>(*this, threads, progress); break; \
+        case Endgame::KQRBK: generateImpl<Endgame::KQRBK>(*this, threads, progress); break; \
+        case Endgame::KQRNK: generateImpl<Endgame::KQRNK>(*this, threads, progress); break; \
+        case Endgame::KQBBK: generateImpl<Endgame::KQBBK>(*this, threads, progress); break; \
+        case Endgame::KQBNK: generateImpl<Endgame::KQBNK>(*this, threads, progress); break; \
+        case Endgame::KQNNK: generateImpl<Endgame::KQNNK>(*this, threads, progress); break; \
+        case Endgame::KRRRK: generateImpl<Endgame::KRRRK>(*this, threads, progress); break; \
+        case Endgame::KRRBK: generateImpl<Endgame::KRRBK>(*this, threads, progress); break; \
+        case Endgame::KRRNK: generateImpl<Endgame::KRRNK>(*this, threads, progress); break; \
+        case Endgame::KRBBK: generateImpl<Endgame::KRBBK>(*this, threads, progress); break; \
+        case Endgame::KRBNK: generateImpl<Endgame::KRBNK>(*this, threads, progress); break; \
+        case Endgame::KRNNK: generateImpl<Endgame::KRNNK>(*this, threads, progress); break; \
+        case Endgame::KBBBK: generateImpl<Endgame::KBBBK>(*this, threads, progress); break; \
+        case Endgame::KBBNK: generateImpl<Endgame::KBBNK>(*this, threads, progress); break; \
+        case Endgame::KBNNK: generateImpl<Endgame::KBNNK>(*this, threads, progress); break; \
+        default: break;                                                         \
+    }
+
+#define KQK_DISPATCH_GEN(eg)                                                    \
+    switch (eg) {                                                               \
+        case Endgame::KQQK: generateImpl<Endgame::KQQK>(*this, threads, progress); break; \
+        case Endgame::KQRK: generateImpl<Endgame::KQRK>(*this, threads, progress); break; \
+        case Endgame::KQBK: generateImpl<Endgame::KQBK>(*this, threads, progress); break; \
+        case Endgame::KQNK: generateImpl<Endgame::KQNK>(*this, threads, progress); break; \
+        case Endgame::KRRK: generateImpl<Endgame::KRRK>(*this, threads, progress); break; \
+        case Endgame::KRBK: generateImpl<Endgame::KRBK>(*this, threads, progress); break; \
+        default:            generateImpl<Endgame::KRNK>(*this, threads, progress); break; \
+    }
+
 void Table::generate(int threads, bool progress) {
     switch (mat.eg) {
         case Endgame::KQK:  generateImpl<Endgame::KQK>(*this, threads, progress);  break;
@@ -613,7 +683,42 @@ void Table::generate(int threads, bool progress) {
                 std::exit(2);
             }
             generateImpl<Endgame::KBBK>(*this, threads, progress); break;
-        case Endgame::KBNK: generateImpl<Endgame::KBNK>(*this, threads, progress); break;
+        case Endgame::KBNK:
+            // Under the ordinary rules ...KxB leaves KNK and ...KxN leaves
+            // KBK, both dead draws, so no conversion is needed.  Under the
+            // capture rules neither is dead, and both are needed -- one per
+            // man, because the two are unlike.
+            if (stalemateLoss && (!sub || !subAlt)) {
+                std::fprintf(stderr, "error: KBNK under capture rules needs %dx%d KNK "
+                                     "and KBK tables attached before it can be solved\n", n, n);
+                std::exit(2);
+            }
+            generateImpl<Endgame::KBNK>(*this, threads, progress); break;
+        // Two white men that can still mate after one is taken, so every one
+        // of these converts under BOTH rule sets: ...KxQ in KQRK leaves KRK,
+        // which White wins.
+        case Endgame::KQQK: case Endgame::KQRK: case Endgame::KQBK:
+        case Endgame::KQNK: case Endgame::KRRK: case Endgame::KRBK:
+        case Endgame::KRNK: {
+            // A conversion is needed only where what is left can still mate.
+            // KRBK is the case that makes the distinction: ...KxB leaves KRK
+            // and wants a table, ...KxR leaves KBK, a dead draw, and wants
+            // none.  Demanding both refused to solve a perfectly well-formed
+            // endgame.
+            for (int i = 0; i < mat.np; ++i) {
+                const Endgame left = bareEndgameOf(mat.piece[1 - i]);
+                const bool canMate = stalemateLoss || left == Endgame::KQK ||
+                                     left == Endgame::KRK;
+                if (canMate && !subFor[i]) {
+                    std::fprintf(stderr, "error: %s needs its %dx%d %s conversion "
+                                         "attached before it can be solved\n",
+                                 mat.name(), n, n, Material::of(left).name());
+                    std::exit(2);
+                }
+            }
+            KQK_DISPATCH_GEN(mat.eg);
+            break;
+        }
         // KNNK qualifies: the only capture available to Black leaves KNK, and
         // KNK contains no mate on any board size, so the capture really is an
         // immediate draw.  KNNNK does not qualify and is not listed here.
@@ -643,6 +748,21 @@ void Table::generate(int threads, bool progress) {
             generateImpl<Endgame::KNNNK>(*this, threads, progress);
             break;
         default:
+            if (isThreeMan(mat.eg)) {
+                // Three men, and one of them can be taken: every one of these
+                // converts, so all three tables have to be there.  Which is
+                // which is decided in attachSubTable; this only checks that
+                // somebody called it.
+                if (!subFor[0] || !subFor[1] || !subFor[2]) {
+                    std::fprintf(stderr, "error: %s needs its %dx%d conversion tables "
+                                         "attached before it can be solved\n",
+                                 mat.name(), n, n);
+                    std::exit(2);
+                }
+                KQK_DISPATCH_THREE(mat.eg);
+                computeStats(threads);
+                return;
+            }
             // KQKR: Black is armed, so none of the reasoning this solver rests
             // on applies.  It has its own, in kqkr.cpp.  KNNNK: a knight
             // capture leaves KNNK, which is not always drawn, so it needs a
@@ -652,6 +772,67 @@ void Table::generate(int threads, bool progress) {
             std::exit(2);
     }
     computeStats(threads);
+}
+
+// ---------------------------------------------------------------------------
+// The conversion chain.  Black's capture is an immediate draw in every endgame
+// here but three, and in those three it leaves material that can still mate,
+// so the value has to be looked up rather than assumed.  See geometry.hpp for
+// the invariant and main.cpp for who calls this.
+// ---------------------------------------------------------------------------
+std::unique_ptr<Table> attachSubTable(Table& t, int threads, bool progress) {
+    // What a capture leaves, one table per man.
+    //
+    // The rule is the same for every endgame here: take White's man i away and
+    // look up what remains.  Whether that material can still mate is what
+    // decides if a table is needed at all -- a bare king cannot, K+B vs K
+    // cannot under the ordinary rules but can under the capture ones, and
+    // anything with two men left always can.  The three cases that used to be
+    // special (KNNNK, and KNNK and KBBK under capture rules) fall out of it.
+    const int np = t.mat.np;
+    if (np == 1) return nullptr;
+
+    auto materialAfter = [&](int gone) -> Endgame {
+        if (np == 2) return bareEndgameOf(t.mat.piece[1 - gone]);
+        const int a = (gone + 1) % 3, b = (gone + 2) % 3;
+        return twoManEndgame(t.mat.piece[a], t.mat.piece[b]);
+    };
+    // Does what is left still hold a mate?  One man does under the ordinary
+    // rules only if it is a queen or a rook, and under the capture rules a
+    // bishop or a knight can force stalemate, which is a loss there.  Two men
+    // left can always mate, so a three-man endgame always converts.
+    auto needsTable = [&](Endgame left) {
+        if (np == 3) return true;
+        if (t.stalemateLoss) return true;
+        return left == Endgame::KQK || left == Endgame::KRK;
+    };
+
+    std::unique_ptr<Table> first;
+    for (int i = 0; i < np; ++i) {
+        const Endgame left = materialAfter(i);
+        if (!needsTable(left)) continue;
+        // The same material twice -- two alike men -- is one table, not two.
+        bool shared = false;
+        for (int j = 0; j < i; ++j)
+            if (t.subFor[j] && t.subFor[j]->mat.eg == left) { t.subFor[i] = t.subFor[j]; shared = true; break; }
+        if (shared) continue;
+        auto sub = std::make_unique<Table>(t.n, left);
+        sub->stalemateLoss = t.stalemateLoss;
+        if (progress)
+            std::fprintf(stderr, "  sub-table %dx%d %s: %llu entries/side\n",
+                         t.n, t.n, sub->mat.name(), (unsigned long long)sub->idx.nslots);
+        // The chain can be three deep now: KQRBK -> KQRK -> KQK.
+        auto deeper = attachSubTable(*sub, threads, false);
+        sub->generate(threads, false);
+        if (deeper) sub->keepAlive = std::move(deeper);
+        t.subFor[i] = sub.get();
+        if (!first) first = std::move(sub);
+        else        t.keepFor[i] = std::move(sub);
+    }
+    // The two-man spelling, kept in step for the code that still reads it.
+    t.sub = t.subFor[np - 1];
+    t.subAlt = t.subFor[0];
+    return first;
 }
 
 } // namespace kqk

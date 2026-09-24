@@ -2213,6 +2213,7 @@ egtb kings    [--min N] [--max N] [-n N] [--white W] [--black B]
                            [--probe SQ,...]
 egtb selftest [--max N] [--brute N]
 egtb sizes    [--max N] [--endgame E]
+egtb serve    [--port P] [--root DIR] [--tables DIR] [--no-tables]
 ```
 
 **Choosing the endgame.** `--endgame` takes `kqk`, `krk`, `kbbk` or `kbnk`;
@@ -2334,6 +2335,221 @@ wK=c2 wB1=b2 wB2=c4 bK=a1, black to move: black is lost, mate in 0 (0 plies)
 `./tests/run_tests.sh` checks all three, and checks that a far-flung second
 bishop is *not* enough: with Bb2 and Bh6 the king simply walks out to a2.
 
+### In a browser
+
+A terminal is a poor way to look at a tablebase, and `egtb serve` is the
+answer: a local web server that puts a board in a browser with every legal
+move listed beside it, each priced by the depth to mate it leads to, the way
+an online tablebase does.
+
+```sh
+./egtb serve                       # -> http://127.0.0.1:8080/
+./egtb serve --port 9000 --tables /Volumes/big/egtb     # a store on another drive
+./egtb serve --no-tables           # solve everything in memory, keep nothing
+```
+
+The front page lists every configuration the solver knows — 34 as this is
+written, from KQK to KKKK vs KK — grouped by rule set. Clicking one opens it on a
+board with a slider for the board size: move the slider and that board is
+solved on the spot and shown. The last few tables built are kept in memory, so
+sliding back and forth is instant after the first time.
+
+Above that catalogue the page lists **what the store actually holds**, which is
+a different and much longer list. A sweep writes every configuration in the
+parameter space of `kings` and `mixed`, not the couple of dozen somebody wrote
+a sentence about: the store this was last run against holds 246 of them over
+2,455 boards in 147 GB, and every one opens by the structured id `/api/store`
+gives it. The list is read from the directory — one `readdir` and one `stat`
+per file, no table opened and no header parsed — and refreshed whenever the
+directory's mtime moves, so a sweep running beside the server appears on the
+page as it goes.
+
+The scan has to know three naming schemes, because three solvers write into one
+directory and each names a file after what it computed: `KKKvNN-n9.tb` for the
+kings lattice, `KQvN-n8.mx` for mixed, `kbnkcap12.kbnk` for the shared and
+armed solvers. Only the last is one file per configuration. The lattice keeps
+one file per *table*, so a configuration counts as held on a board only when
+every table its captures convert into is held on that board too — reporting the
+top table alone would promise a board that then stalls rebuilding the ones
+underneath it.
+
+A catalogue ceiling says how big a board is worth solving from cold, and has
+nothing to say about a board already on the drive; a configuration's maximum
+therefore rises to whatever has been generated. KQKBB is listed to 8 × 8
+because 9 × 9 takes minutes, and with a store holding both it opens on 10 × 10
+— mate in 82 — without solving anything.
+
+**The table store.** `--tables DIR` is read first and written second: the file
+for a configuration and board is loaded if it is there, and otherwise the table
+is solved and then written for next time. It defaults to `artifacts/tables`.
+The effect on the boards that hurt is the whole point of it:
+
+| | solved | loaded | file |
+|---|---:|---:|---:|
+| KQKBB, 8 × 8 | 31.3 s | 1.03 s | 212 MB |
+| KQKK capture rules, 8 × 8 | 4.2 s | 0.4 s | 4.2 MB |
+| KKKK vs KK, 8 × 8 | 46 s | mapped | 21 MB, per table of the lattice |
+
+Three things about it are deliberate.
+
+*A file that will not load is a miss and nothing more.* A truncated write, a
+format from another version, a header that disagrees with the index this build
+computes — any of them, and the table is solved as if the file had not been
+there. The alternative is drawing a board from a file nobody can vouch for, and
+a cache that cannot be re-derived is not a cache. `tests/run_tests.sh` §23
+overwrites a stored table with rubbish and checks the answer does not change.
+
+*Cheap tables are not written.* Some of these files are enormous and most of
+these tables solve in hundredths of a second, so a table is kept only when
+solving it cost more than `--save-over` seconds, 2 by default. That is why the
+KQKBB run above writes `kqkbb8.kqkbb` and re-solves its KQK conversion every
+time: KQK at 8 × 8 takes 0.01 s, which is less than opening a file.
+
+*The kings lattice keeps its own store,* and a better one: `TableKings::store`
+holds a file per *table* rather than per configuration and maps it rather than
+reading it, so KKK vs KK reuses the KK vs K that every other row of the lattice
+also needs. The explorer points it at the same directory and otherwise leaves
+it alone.
+
+Adding the store meant giving two tables an on-disk form they had never had.
+`Table`, `TableKQKK` and `TableKQKKCap` had one; `TableKQKR` and `TableKQKBB`
+had none, and now share one in `io.cpp` — a run-length encoding over *values*
+rather than bytes, since a byte-wise pass over little-endian `int16_t` breaks
+every run in two. `Table`'s own header gained a flag for the capture rules,
+which it had never recorded: the same material is worth different things under
+them, and without the flag a capture table and a mating table of one endgame
+were the same file. `TableMixed` still has none and does not want one — it is
+the unreduced solver, so its tables are eight times the size of the reduced
+ones, and it solves a board in hundredths of a second.
+
+**The position it opens on** is not the deepest win the table holds, which is
+usually a poor thing to look at: the deepest win is frequently one where
+something already hangs, so the position reads as a puzzle with the answer
+given away and its best move is a capture. What the explorer opens on instead
+is the deepest win White has *from a quiet placement with White to move* —
+quiet meaning no capture is available to either side and nobody is in check.
+Failing that it falls back to the deepest win from any placement, and failing
+that to any quiet placement at all; the page says which of the three it found.
+
+**Where the opening position comes from now.** That scan is the single most
+expensive thing the server does, and on a table mapped from an external drive
+it is ruinous: it is a random-access pass over the whole mapped file, 83 s for
+3K vs 2N on 9 × 9 and minutes for the larger lattice boards, against a fraction
+of a second to map the file. It is why a store on a slow drive was for a while
+*slower* than no store at all — KKK vs KK on 10 × 10 took 109 s with the store
+against 30 s solving it from cold in memory.
+
+The scan has already been done, though, once, by the sweep that generated the
+table, and its answer is two columns of `stats.csv`. So `serve --stats FILE`
+looks there first for the kings lattice and hands the engine the position,
+which then has no reason to census at all; the census itself became lazy, taken
+only if something asks for it. The file is authority for nothing — the position
+is parsed and validated against the engine exactly like a position from a URL,
+and a row that does not match is simply not used.
+
+| KKK vs KK, opened cold from the store | before | after |
+|---|---:|---:|
+| 10 × 10 | 109.43 s | **0.51 s** |
+| 12 × 12 | minutes | **0.07 s** |
+
+Checked rather than assumed: two servers on the same store, one given the
+statistics file and one not, were asked for the opening position of 18
+configurations on two boards apiece, and all 36 answers were identical —
+position, side to move and value. (Limiting the shortcut to the kings lattice
+is what makes that true. The shared solver's scan is cheap, and where several
+placements tie at the deepest depth the sweep and the explorer break the tie
+differently: both are correct, the depths agree, but there is no reason to
+change which position the other families have always shown.)
+
+**The findings the front page shows** are drawn from `stats.csv` by category
+rather than by one score. There were five categories worth the room, and the
+page shows a mixture of them rather than twelve readings of whichever ranks
+highest:
+
+- *the deepest win that begins with nothing hanging* — the hardest genuine
+  problem a configuration contains;
+- *shorter on a bigger board* — the depth peaks on a middle board and falls
+  away on the larger ones. 105 materials do this. KKK vs NN needs 193 plies on
+  9 × 9 and 61 on 14 × 14: room to run is also room to be chased into;
+- *no quiet win exists* — won from a quarter of all placements and from none
+  that is quiet, so every win needs a man already standing where it can be
+  taken;
+- *White never wins it* — 17 materials that White does not win on any board
+  measured. There is no winning position to link to, so the card opens the
+  configuration and lets the explorer show Black's best instead;
+- *won from every placement* — 52 materials, either side to move.
+
+Two of the adapters needed a further fallback once the front page began
+advertising what is on the drive, because White having no win is an ordinary
+outcome in a parameter space nobody curated. One man against two is generated
+as readily as three against one, and QQ vs QQ on 6 × 6 is drawn everywhere; the
+kings adapter now opens on *Black's* deepest win when White has none, and on an
+arbitrary placement when neither side wins anywhere. The mixed adapter had no
+fallback at all: on 3 × 3 a queen bears on every square, so KQ vs N has no
+quiet placement whatever and the page answered 404 for a table that was sitting
+on the drive. Every id the two lists offer was then opened against a running
+server, one board apiece — the 34 in the catalogue at their smallest board and
+the 214 the store adds at 6 × 6 — and all 248 answered.
+
+The two often coincide and it is worth seeing where they do not. On 8 × 8 the
+deepest KQK win, wKa1 wQb2 bKf5, is quiet, so that is what opens. The deepest
+KBBK win is wKa1 wB1d1 wB2h4 bKd2 at mate in 19 — but the black king on d2
+stands beside an undefended bishop on d1, so ...Kxd1 is legal and the position
+is not quiet. The explorer opens on mate in 18 instead. In KK vs KK the
+fallback goes all the way. The scan is exhaustive over the table, so its
+coming back empty is a statement and not a failure to look: **every** White
+win in KK vs KK has something hanging in it, and there is no quiet one to open
+on at all.
+
+Five routes make up the whole server:
+
+| route | what it answers |
+|---|---|
+| `GET /api/families` | the catalogue, generated from `src/explore.cpp` |
+| `GET /api/store` | everything the `--tables` store holds, read from the directory |
+| `GET /api/interesting` | what the statistics single out, and a summary of them |
+| `GET /api/position?family=&n=&pos=&stm=` | a position, its value, and every legal move with the value it leads to |
+| `GET /`<i>anything else</i> | a file under the web root |
+
+`--read-only` reads the store without adding to it, for a directory that is
+full, shared, or on a drive that should not be written.
+
+A position travels as `wKa1,wQb2,bKf5` — colour, piece letter, square, which
+is also what the browser's address bar shows, so a position can be linked to
+or pasted into a bug report. Squares are algebraic, which is why the explorer
+stops at *n* = 26.
+
+**Adding a configuration** means adding one `Family` row to the catalogue in
+`src/explore.cpp` and, if its table is not one of the seven already adapted,
+one `Engine` that turns a placement into a list of men and walks its legal
+moves. No HTML, no JavaScript and no route changes: the catalogue page is
+generated from `/api/families`, and the board page knows nothing about any
+endgame — it draws the men the server sends and sends a position string back.
+Configurations the catalogue does not list can still be addressed by a
+structured id, `kings-3-1-king-king` or `mixed-king-queen-knight`, which is
+how the parameter space of `kings` and `mixed` stays reachable without 200
+cards on the front page. They are not invisible, though: `/api/store` lists
+every one the drive holds, as a row with a link per board size rather than as a
+card, so the front page can show hundreds of configurations without becoming
+hundreds of cards.
+
+What the explorer will not do is follow a conversion that turns the board
+round. White's ...QxR in KQKR leaves KQK and play goes on in it; Black's
+...RxQ leaves the rook against a bare white king, which is the KRK table read
+with the colours swapped, and there the move is shown with its value and not
+played on. The same holds for ...BxQ in KQKBB. Every other conversion —
+KNNNK's captures, and the whole falling-material lattice of the capture-rule
+endgames — is followed to the end.
+
+`tests/run_tests.sh` §22 starts a server and plays out **every** configuration
+under best play, checking that the value falls by exactly one ply per move and
+that the line is as long as the opening value said. That is one assertion, but
+it runs through the adapters, the value conversions and the move walk of every
+table in the program. §23 does the same twice over against a store — once cold
+into an empty directory, once warm out of the files the first pass wrote — and
+requires the two to be identical, which is the only thing that makes a stored
+table worth having.
+
 ### Library
 
 ```cpp
@@ -2416,6 +2632,9 @@ class — is the one the design optimises.
 | `src/kqkk.cpp` | KQKK: two black kings, both rule sets, its own solver, verifier and brute force |
 | `src/kqkkcap.cpp` | KQKK under capture rules: signed entries, three sub-endgames, a bucketed induction |
 | `src/kings.cpp` | KKK vs KK: kings only, capture rules, a six-table conversion lattice, an index of two unordered like sets |
+| `src/explore.cpp` | the browser explorer's catalogue, and one adapter per table type |
+| `src/serve.cpp` | `egtb serve`: a loopback HTTP server over those adapters |
+| `web/` | the two pages it serves — a catalogue and a board |
 | `src/main.cpp` | command line |
 
 ### What adding each endgame actually took
@@ -2544,6 +2763,370 @@ queen both move symmetrically.
 *And one thing stopped paying.* Run-length encoding compresses every other
 table here and inflates this one, for the reason in §5, so the writer encodes,
 compares and keeps whichever is smaller.
+
+#### Three white men vs a bare king: two bugs about conversions
+
+The nineteen three-man endgames (KQQQK through KBNNK) reuse the shared solver
+wholesale -- Black is still bare, so every invariant in §2 holds -- and needed
+only two new configuration shapes in the index codec: an ordered triple, and a
+pair of alike men plus one odd man. What they did *not* reuse cleanly was the
+conversion chain, and both bugs there are worth recording because neither
+crashed and both produced entirely plausible tables.
+
+1. **The survivors were handed over in the wrong order.** A three-man endgame
+   with a pair of alike men names the pair first and the odd man last -- KQNNK
+   is N,N,Q -- while the two-man tables are named strongest first -- KQNK is
+   Q,N. All three places that build the position after a capture
+   (`captureValue` in `solver.cpp`, the same logic in `verify.cpp`, and the
+   independent copy in `brute.cpp`) copied the leftovers across in the parent's
+   order, so taking a knight off KQNNK probed KQNK with its queen and knight
+   exchanged. That is a different entry and usually an illegal one, which reads
+   back as "not a win" and so as an escape: the six endgames whose odd man
+   outranks its pair -- KQRRK, KQBBK, KQNNK, KRBBK, KRNNK, KBNNK -- came out
+   too drawish. The fix is to match survivors on piece type against the
+   sub-table's own order rather than trusting position.
+
+   The verifier could not catch this, because it re-derives from successors
+   through the same conversion and was wrong in exactly the same way. Only
+   brute force could, and only because its copy of the logic was wrong
+   *differently* enough to disagree somewhere. That is the whole argument for
+   keeping three independent checks, made again.
+
+2. **Brute force stopped before its own seeds.** A black-to-move position whose
+   every move is a capture is settled during initialisation, at whatever depth
+   the sub-table gives it. So the depths present in the array are not a dense
+   range starting at zero: they have gaps, and a gap is not the end. The
+   induction in `brute.cpp` ended at the first round that resolved nothing,
+   abandoning every seed above it -- its deepest KBNNK win was 25 plies where
+   the true answer is 27. It now records the deepest seeded depth up front and
+   stops only once it is past it.
+
+   This one was latent, not new. KNNNK converts into KNNK by the same mechanism
+   and has always run through this loop; its chain is simply too shallow to
+   leave a gap wide enough to notice. A reference solver that quietly stops
+   early is worse than no reference at all, because it agrees with the thing it
+   is meant to be checking almost everywhere.
+
+The moral both bugs share: a conversion is a join between two tables that were
+designed separately, and the join is where the assumptions each one makes about
+the other stop being checked by anything.
+
+#### One solver for the rest: arbitrary material
+
+The eight solvers above between them answer 220 of the 1,260 materials of at
+most five men under capture rules, and 44 of the 85 under the ordinary ones.
+What is left is not hard in any new way. It is 28 distinct *shapes* -- three
+white men against two black, two kingless men against two more, three kings
+against a knight -- and each would be a file of its own written to the same
+plan. `src/general.cpp` takes the material as data instead: two lists of men, a
+rule set and a board, with everything the other solvers fold into compile-time
+constants read out of those lists at run time.
+
+Three things had to be decided rather than inherited.
+
+1. **What makes a side beaten is a property of the variant, not the position.**
+   A side with kings is beaten when its last king falls; a side with none, when
+   its last man does. Part-way through a game those are indistinguishable from
+   the board -- a White with no kings and a queen left might be a kingless side
+   still fighting or a royal side already beaten -- so the material carries a
+   `royalW` and a `royalB`, fixed at the root and inherited by every
+   sub-material. A material in which a royal side has no king is not a table at
+   all; it is a result, and the capture reaching it is scored on the spot.
+
+2. **The value carries one more than the distance.** Every other signed table
+   here reads plies straight out of the value and uses 0 for a draw, which
+   works only while nothing is lost in *nought* plies. Here checkmates are, and
+   so is every genuine stalemate under capture rules, so a value is
+   `±(plies + 1)` and 0 stays free for the draw.
+
+3. **Capture rules mean kings.cpp's rules, not the shared solver's flag.** A
+   king is an ordinary man, the win is taking the opponent's last king, and a
+   side walled in by its *own* men is stalemated and drawn. The shared solver's
+   `stalemateLoss` is a different encoding of the same game: it keeps chess
+   legality and scores a *chess* stalemate as a loss, which is right there
+   because a bare king with no chess move must step into attack and be taken.
+   Getting this backwards -- scoring every immobility as a loss -- was the
+   first thing the cross-checks caught.
+
+The index is the plain ordered product, with no D4 reduction, for mixed.cpp's
+reason: it shares no canonicalisation with the reduced solvers, so running it
+over a material one of *them* can do and comparing entry by entry is a real
+check rather than a tautology. That is also its limit. Twelve bytes a slot over
+`nsq^k` slots fits five men to 6 x 6 and four men to 11 x 11, and five men on
+8 x 8 wants the reduction. `maxMenFor` refuses a board it cannot hold rather
+than dying on it.
+
+**What it is checked against.** Its own verifier and its own sweep share its
+move generator, so between them they can only catch a mistake in the induction.
+The evidence that matters is the other solvers, which answer the same questions
+through different indices, different generators and different inductions:
+
+| against | runs | agreeing |
+|---|---|---|
+| the shared solver, ordinary rules, exact value | 83 | 83 |
+| the shared solver, capture rules, verdict | 83 | 83 |
+| `kings.cpp`, exact value | 17 | 17 |
+| `mixed.cpp`, kingless white pairs, exact value | 30 | 30 |
+| materials nothing else here can answer, verifier and sweep | 56 | 56 |
+
+Under capture rules the shared solver is compared on verdict and not on depth,
+because the two stop at different places: it stops when the king is trapped,
+this one plays on and takes it, so the depth is one or two plies longer for the
+same position. That is a difference of convention and it is the reason the
+table above splits those two rows.
+
+#### Are the capture-rules solvers all playing the same game?
+
+The rule, stated plainly: **a side that has kings is mated when its last king
+is captured; a side with no kings is mated when all its men are captured.**
+The general solver implements exactly that, which makes it a yardstick the
+older solvers can be held against -- over every placement, not every legal
+one, so that a placement one of them refuses to model shows up instead of
+being quietly skipped. Measured on 4 x 4 and 5 x 5:
+
+The census first, so that "every solver" is a claim with a denominator: the
+site serves 220 capture materials, from `kings.cpp` (130), `mixed.cpp` (50),
+the shared solver (30) and `kqkr.cpp` (10). Nothing else answers a capture
+position. `kqkkcap.cpp` is a fifth, correct, and not wired to the catalogue at
+all -- KQ vs KK comes back unsupported.
+
+| solver | materials it serves | runs | not modelled | verdicts differing |
+|---|---|---|---|---|
+| `kings.cpp`, all 25 piece-kind pairs | 130 | 125 | 0 | **0** |
+| `kqkkcap.cpp` (unused by the site) | KQKK | 2 | 0 | **0** |
+| `mixed.cpp`, kingless white pair | 30 | 30 | 0 | **0** |
+| the shared solver's capture readings | 30 | 30 | **12,641,000** | 0 |
+| `mixed.cpp`, white pair with a king | 20 | 20 | 0 | **151,744** |
+| `kqkr.cpp`'s capture readings | 10 | 10 | **502,240** | **84,932** |
+
+The last two rows are what the audit was for, and both have since been dealt
+with; the numbers are kept as they were measured, because they are the reason
+for the changes that follow.
+
+**`mixed.cpp` was fixed in place.** Its conversion lattice now ends the game
+when the man taken was the side's LAST king, at the six places a capture is
+priced -- the sweep induction, the frontier induction, the line walker, the
+explorer's move list and the lattice key that says which table a placement
+lives in. All twenty king-containing materials in the table above agree with
+the rule exactly, the thirty kingless ones are unchanged, and the file's own
+frontier-against-sweep gate agrees on 18 of 18 configurations.
+
+"Last" is doing work in that sentence that "only" did not, and the difference
+cost a second bug. The first repair asked whether the man taken was a king,
+full stop, and justified it in a comment: a mixed pair holds two UNLIKE men, so
+at most one of them can be a king, and if one is it is the side's only one. The
+premise is false, and this file's own opening paragraph says so -- it is run on
+two ALIKE men deliberately, because that is how it cross-checks `kings.cpp`. A
+white KK is a side with two kings, and the repair had it beaten the moment the
+first one fell. On 3 x 3, KK vs K went from a White win everywhere to 400 Black
+wins out of 504 with Black to move, in a material where Black cannot win at
+all. The predicate now takes the survivor as well and ends the game only when
+he is not himself a king; measured against the version 1 files still on disk,
+the five KK materials are byte-identical to what they were before either
+repair, and the twenty one-king materials are the only ones that ever differed.
+
+The reason it survived is worth more than the bug. The audit's denominator was
+fifty of this solver's seventy-five materials, and the twenty-five it never ran
+were exactly the ALIKE pairs -- its loops walked `qr qb qn rb rn bn` for the
+kingless case and `k` against `q r b n` for the king-containing one. The loop
+was written from the file's title, and so it inherited the same false premise
+as the fix, and could not have contradicted it. Meanwhile nothing in
+`tests/run_tests.sh` mentioned `mixed` at all: the word did not appear in the
+file. A solver with no gate section, audited by a sweep that shared the bug's
+assumption, is a solver that can be wrong for as long as it likes. Section 25
+now runs all seventy-five shapes against the general solver and asserts the
+count, so a loop that quietly runs none of them fails rather than passes.
+
+**`kqkr.cpp` was not fixed; its capture families were moved.** An in-place fix
+is not local to that file: its captures convert into the shared solver's
+capture tables, which are the ones missing 58% of their placements, so making
+KQKR whole under these rules means making KQK whole first, which means changing
+what the index calls a legal position and regenerating all thirty shared
+capture materials. The ten capture families were given to the general solver
+instead, which already answers that whole chain consistently. `kqkr.cpp` keeps
+its ordinary-rules families, which are exact on every placement -- 20 runs over
+all ten materials, no disagreement and nothing unmodelled -- and its capture
+path remains reachable from the command line but is no longer what the site
+serves.
+
+That leaves the shared solver's thirty. They are incomplete and strategically
+correct: the depth gap against the rule is uniformly +2 plies, on every decided
+entry of all thirty materials at two board sizes, with no exceptions. The
+constant is Black stepping into attack and White taking the king. So those
+tables do not need regenerating; they need extending, and only if positions
+with a capturable king are wanted.
+
+The `kings.cpp` row is the one worth a word about method. Its piece codes let
+either side be kings, queens, rooks, bishops or knights, and the first pass of
+this audit tested only the king-against-king kind -- six of its hundred and
+thirty rows -- and argued the rest from the structure: each side there holds
+one kind of man, so "beaten when the last king falls" and "beaten when the last
+man falls" name the same moment whichever kind it is. The argument is sound and
+it was still the wrong thing to report, because an argument is not a
+measurement. All twenty-five kind pairs were then run, and all twenty-five
+agree.
+
+Three of them are exactly right, `kqkkcap.cpp` most pointedly so: it is the
+file that states the rule, and it is the one case where a side holds a king
+*and* another man, so it is the only existing solver that had to decide whether
+the queen saves a White whose king has just been taken. It decides that it does
+not, and the general solver agrees with it entry for entry.
+
+The other three are wrong in two different ways, and the difference matters.
+
+**The shared solver is incomplete, never incorrect.** Its capture readings keep
+chess legality, so a placement with the kings adjacent, or with a king standing
+en prise, is not in the table at all -- 58% of all placements. Every verdict it
+*does* give agrees with the rule, across all thirty materials and 9.2 M
+placements, because from a position where no king is capturable neither side
+can profitably make one capturable. So the tables are right about the game they
+contain; they simply do not contain the positions where a king may be taken,
+and under these rules those are reachable, because a king may walk up beside
+the other one.
+
+**`mixed.cpp` gets the royalty wrong.** It converts a captured white man into a
+table of the survivor, so a side there is beaten only when its *last man* goes.
+For a kingless pair that is the rule exactly, and all thirty such materials
+agree. For the twenty in which White holds a king beside another man it is the
+opposite of the rule: on 5 x 5 with wK a1, wQ b1 and a black knight on c2,
+`...Nxa1` takes White's only king, which wins on the spot -- and `mixed.cpp`
+plays on with the queen and scores Black as lost in four.
+
+**`kqkr.cpp`'s capture readings are wrong both ways.** Both sides hold a king
+there, so as well as omitting 57% of the placements it disagrees on 84,932 of
+the verdicts it does give -- every one of its ten materials. With both sides
+armed, the captures the rule allows and chess does not are not merely extra
+lines: they change who wins. Its *ordinary*-rules tables are exact, on every
+placement, for all ten materials.
+
+So of the 220 capture materials the site serves, 160 are right, 30 are right as
+far as they go, and 30 -- twenty from `mixed.cpp` and ten from `kqkr.cpp` --
+answer a different game from the one the rules describe.
+
+#### The reduction, and two readers that did not get the memo
+
+The general solver's index began as the plain ordered product, which costs a
+factor of eight against every other table here. `genindex.hpp` keys a block on
+a canonical pair of squares the way `index.hpp` does, with one difference that
+matters: `index.hpp` keys on the KING pair, and half of these materials have no
+such pair -- a side may have no king, or three -- so the key is simply the
+first two men, whatever they are. Nothing about D4 cares what they are; it acts
+on squares. The cost is a residual stabiliser: a pair lying on an axis is fixed
+by some element of D4, that element permutes the remaining men among
+themselves, and one of the placements it identifies has to be declared
+canonical and the other dead. `restCanonical` is the single predicate that
+decides it, for the same reason `Index::cfgLive` is a single predicate.
+
+What it buys, on KQ vs KR:
+
+| | plain | reduced |
+|---|---|---|
+| n = 10 memory | 2.10 GB | **383 MB** |
+| n = 10 file | 190.7 MB | **24.0 MB** |
+| n = 8 file | 32.0 MB | **4.0 MB** (`kqkr.cpp`'s own is 6.3 MB) |
+
+All ten capture materials over boards 3..11 -- 19 materials once the conversion
+chain is counted, 171 files -- come to 1.04 GB and 173 seconds of solve time.
+The ten `kqkr.cpp` capture families they replace are 1.97 GB and cover the same
+materials, so the corrected tables are half the size of the wrong ones.
+
+The interesting part is what turning the reduction on broke. A ranking is not a
+value, and every place that turns a placement into a slot has to go through the
+table's own `rank`/`unrank` rather than through `idx`, which under the
+reduction is no longer the ranking the values were stored under. Three rounds
+of this were needed before the last one was found:
+
+1. `genValueAfter`, `genVerify` and `genBruteForce` still used `idx`. Caught by
+   the general solver's own checks.
+2. Five cross-check sites in `main.cpp` used `gt->idx.encode`. Caught loudly --
+   all 52 comparisons against the older solvers failed at once. A uniform
+   failure like that is mechanical, not fifty-two bugs.
+3. `GeneralEngine::value` and `GeneralEngine::start`, in the explorer. Caught by
+   nothing, for a while. `value` read the wrong slot; `start` walked
+   `idx.nslots`, which is eight times the reduced table's length, so it indexed
+   off the end of the array outright. The site served "White wins -- mate in
+   16375 (32759 plies)" for a 6 x 6 board.
+
+The third is the one worth recording, because §22 of the gate plays out every
+configuration and compares each best move against the position it came from --
+it should have caught this on the first run, and it reported ok. It did not
+catch it because at the default board the out-of-bounds read returned zero, the
+root came back "Drawn", and a drawn root was the one answer §22 accepted
+without asking anything: the walk never runs, the length test is skipped
+because the depth is zero, and the configuration is counted as checked. A
+reader that returns zero for every position passed that section outright. §22
+now requires a drawn root to justify itself -- if the best move wins for the
+side to move, the position was not drawn -- and rejects any root claiming more
+than ten thousand plies, a bound only nonsense can reach.
+
+A third fault came out of the same session and is smaller but the same shape:
+`serve --read-only` is implemented as a `--save-over` threshold beyond any
+possible solve time, and `genSolve` was never given the threshold, so it wrote
+into a store it had been told not to touch. The general solver was the only
+table type whose store did not take the parameter, because it was the only one
+whose store was added after the flag.
+
+### What putting it in a browser actually took
+
+The explorer is not a new endgame, but it is a new *reader* of all of them at
+once, and that turned out to be a useful thing to have asked for: it needs, of
+every table in the program, the same three operations, and it needs them
+uniformly. Most of that was already there, and the shape of what was missing
+is worth recording.
+
+*What was already there, and is the whole reason this was small.* Four of the
+seven table types already export a "walk the legal moves, reporting each
+successor and the value it leads to" function — `kqkrMoves`, `kqkbbMoves`,
+`kqkkMoves`, `kqkkCapMoves` — written for the verifiers and the play-outs. The
+shared solver exports `genWhite`/`genBlack` in `movegen.hpp`. Those five are
+exactly the interface a board in a browser wants, so five of the seven
+adapters are transcription and nothing more, and no rule about how a piece
+moves was written a second time anywhere.
+
+*What was missing, and what it says.* Three things, and all three were the
+same thing:
+
+1. **`kings.cpp` had a play-out but no move list.** `genMoves` was there and
+   internal, used by the census, the brute force and the line printer.
+   `TableKings::moves` exposes it, with each successor already priced through
+   the same `look` the solver uses — which for this endgame means following
+   material down the lattice, since a capture lands in a smaller table.
+2. **`mixed.cpp` had no table at all.** `runMixed` solved, counted, printed
+   and dropped everything, which is all the command line ever wanted. The
+   explorer wants the opposite: solve once, then answer many probes. The
+   solve sequence is now `solveMixed`, called by both, and `TableMixed` keeps
+   the three tables it fills.
+3. **`kqkkCapMoves` walked the four-man position and nothing else.** Under the
+   capture rules material falls, so every interesting line *leaves* the
+   four-man table — ...KxQ into K vs K + K is the line §5 shows off — and a
+   move list that stops there stops exactly where the endgame gets
+   interesting. The reduced cases are now handled, transcribed branch by
+   branch from `reKQK`/`reKKK`/`reKK` in the verifier, which is the generator
+   written straight down the rules rather than through the solver's rays.
+
+The pattern in all three: **the table types that keep a solved object around
+were ready, and the ones that only ever answered a command line were not.**
+Nothing was wrong with them — a census does not need a move list and a
+one-shot count does not need to persist — but "can something else read this?"
+is a different question from "is this right?", and only the first one had been
+asked of them.
+
+*Two things were hoisted rather than copied.* `attachSub`, which builds the
+KNNNK → KNNK → KNK chain, moved from `main.cpp` to `solver.cpp` as
+`attachSubTable`, because the explorer builds the same chain and a second copy
+of that recursion is exactly the kind of duplication §4 warns about. The four
+check predicates of `kqkr.cpp` and `kqkbb.cpp` moved into `table.hpp` for the
+same reason: which men block which ray is the easy thing to get wrong, and
+getting it wrong somewhere that only draws a board would be found late or
+never.
+
+*One thing is computed rather than looked up,* and it is the only piece of
+judgement in the whole layer: which position to open on. See §6 — the deepest
+win a table holds is usually the wrong one to show, and asking each adapter
+for the deepest win from a *quiet* placement instead turned up a result worth
+having on its own. In KK vs KK there is no such position at all: the scan
+covers every canonical slot, and every White win in that endgame has something
+hanging in it.
 
 ### Extending further
 

@@ -38,6 +38,21 @@ struct Stats {
     U64 fwLive = 0, fwWin = 0, fwDraw = 0;
     U64 fbLive = 0, fbLoss = 0, fbDraw = 0, fbMate = 0, fbStale = 0, fbEnPrise = 0;
 
+    // The same counts restricted to QUIET placements: Black not in check and
+    // nothing of White's hanging.  That is the definition the explorer uses
+    // (sharedQuiet in explore.cpp) and it is repeated rather than shared
+    // because it is four lines and stats.cpp should not depend on the browser
+    // code.  Filled only when computeStats is asked, since the test costs a
+    // move generation per placement; `quietCensus` says whether it was.
+    // Black has a bare king in every endgame this solver takes, so Black never
+    // wins: white-to-move is win or draw, black-to-move is loss or draw.
+    bool quietCensus = false;
+    U64 fQuiet = 0;                       // orbit weighted, one side to move
+    U64 fqwWin = 0, fqwDraw = 0;          // white to move
+    U64 fqbLoss = 0, fqbDraw = 0;         // black to move, loss = White wins
+    U32 maxPlyQuiet = 0;                  // deepest win from a quiet placement
+    Pos longestQuiet;
+
     U32 maxPly = 0;             // deepest win, in plies (white to move)
     Pos longest;                // one position realising it
     U64 longestSlot = ~0ull;    // its slot, so the choice is reproducible
@@ -90,6 +105,25 @@ public:
     // has to be looked up rather than assumed safe.  See geometry.hpp.
     const Table* sub = nullptr;
 
+    // The SECOND conversion, for two unlike white men.  With KBBK or KNNK it
+    // does not matter which man Black takes -- what is left is the same
+    // material either way -- but with a queen and a rook it matters entirely:
+    // ...KxQ leaves KRK and ...KxR leaves KQK, two different tables with two
+    // different answers.  `sub` is read when the man at index 1 was taken and
+    // the man at index 0 survives; `subAlt` when it was the other way round.
+    // A like pair leaves subAlt null and reads `sub` for both.
+    const Table* subAlt = nullptr;
+    std::unique_ptr<Table> keepAlive2;   // owns subAlt when this table built it
+
+    // One conversion per man: subFor[i] is the table of the material left
+    // when White's man i is taken.  Two men needed two of these; three men
+    // need three, and with three unlike men they are three different tables
+    // -- ...KxQ in KQRBK leaves KRBK, ...KxR leaves KQBK, ...KxB leaves KQRK.
+    // sub and subAlt above are the two-man spelling of the same thing and are
+    // kept in step with it.
+    const Table* subFor[MAXWP] = { nullptr, nullptr, nullptr };
+    std::unique_ptr<Table> keepFor[MAXWP];
+
     Table(int edge, Endgame eg = Endgame::KQK)
         : n(edge), mat(Material::of(eg)), geo(edge), idx(geo, mat) {}
 
@@ -102,7 +136,9 @@ public:
     // number of mismatches; 0 means the table satisfies the Bellman equations
     // everywhere.  `stride` > 1 checks a deterministic sample.
     U64 verify(int threads, U64 stride, bool progress) const;
-    void computeStats(int threads);
+    // `quiet` adds the quiet-restricted census above, at the cost of a move
+    // generation for every placement.
+    void computeStats(int threads, bool quiet = false);
 
     void save(const std::string& path, bool rle) const;
     static std::unique_ptr<Table> load(const std::string& path);
@@ -155,13 +191,19 @@ public:
     U64 stride1 = 0, stride2 = 0;   // index strides for the piece squares
     std::vector<U8> w, b;
 
-    // The table Black's captures convert into, or null when they are draws.
-    // Only KNNNK passes one; see Table::sub.
+    // The tables Black's captures convert into, or null when they are draws.
+    // Two of them, for the same reason Table has two: with two unlike white
+    // men what survives the capture depends on which man was taken.
     const Table* sub = nullptr;
+    const Table* subAlt_ = nullptr;
+    // One per man, as Table has: which table answers depends on which man the
+    // capture took.
+    const Table* subFor_[MAXWP] = { nullptr, nullptr, nullptr };
     bool staleLoss_ = false;   // capture rules: stalemate is a loss
 
     BruteForce(const Geometry& geo, Material m, const Table* subTable = nullptr,
-               bool staleLoss = false);
+               bool staleLoss = false, const Table* subAlt = nullptr,
+               const Table* const* subFor = nullptr);
     U64 index(const Pos& p) const;
     U8 at(const Pos& p, bool whiteToMove) const;
     Stats census() const;   // whole-board counts only (the f* fields)
@@ -189,6 +231,13 @@ struct PolicyScore {
 // `optimum` exactly, which is the control saying the scorer measures the rule
 // and not itself.
 PolicyScore policyScore(int n, bool oracle, int threads);
+
+// Builds and attaches the table Black's capture converts into, when the
+// material leaves one that can still mate: KNNNK -> KNNK -> KNK, and under
+// capture rules KNNK -> KNK and KBBK -> KBK.  Returns the owner of the chain,
+// which the caller must keep alive for as long as `t`, or null when the
+// capture is an outright draw and no table is needed.  Sets `t.sub`.
+std::unique_ptr<Table> attachSubTable(Table& t, int threads, bool progress);
 
 // Compares `t` against a freshly built BruteForce, position by position and
 // census line by census line.  Returns the number of disagreements.
@@ -241,13 +290,32 @@ public:
     // conversions inherit it.
     bool stalemateLoss = false;
 
+    // The two conversions, built on demand and then kept: KQK for White's
+    // ...QxR, and KRK or KBK for Black's ...RxQ.  Mutable and lazy for the
+    // same reason as TableKQKBB's pair below -- a probe or a move walk is
+    // const and still has to be able to price a capture, which is where most
+    // of this endgame's play actually lands.  Keeping them matters here in a
+    // way it did not when only the command line called: the browser explorer
+    // asks for the moves of one position at a time, and rebuilding both
+    // conversions per call made every click cost a full KQK and KRK build.
+    mutable std::unique_ptr<Table> convQ;    // White took Black's man: KQK
+    mutable std::unique_ptr<Table> convB;    // Black took the queen: KRK or KBK
+
     explicit TableKQKR(int edge, Endgame eg = Endgame::KQKR)
         : n(edge), geo(edge), mat(Material::of(eg)), idx(geo, mat) {}
 
+    // Builds the two conversions unless they are already there.
+    void buildSubTables(int threads, bool progress) const;
     void generate(int threads, bool progress);
     // Recomputes every entry from its successors with the forward move
     // generator alone.  Returns the number of mismatches.
     U64 verify(int threads, bool progress) const;
+
+    // On-disk form; see io.cpp.  The census is not stored, so a loaded table
+    // has `st` zeroed -- the one caller that loads reads the values directly.
+    void save(const std::string& path, bool rle) const;
+    static std::unique_ptr<TableKQKR> load(const std::string& path);
+
     // Signed value; see kqkr.cpp for the encoding.  wp[0] is White's queen,
     // wp[1] Black's rook.
     int16_t valueAt(const Pos& p, bool whiteToMove) const;
@@ -256,12 +324,33 @@ public:
 // What ...xQ leaves: KRK for a black rook, KBK for a black bishop.
 Endgame subEndgame(Endgame eg);
 
+// The check tests of the two armed-Black endgames.  A square is passed as -1
+// when that man has been captured, and Geometry::attacks treats a negative
+// blocker as absent, so the same call serves before and after a capture.
+// These live here rather than inside the solvers because the browser explorer
+// needs exactly the same test -- which men block which ray is the easy thing
+// to get wrong, and getting it wrong somewhere that only draws a board would
+// be found late or never.
+inline bool kqkrBlackChecked(const Geometry& g, Piece wp, Sq wk, Sq bk, Sq wq, Sq br) {
+    return wq >= 0 && g.attacks(wp, wq, bk, wk, br);
+}
+inline bool kqkrWhiteChecked(const Geometry& g, Piece bp, Sq wk, Sq bk, Sq wq, Sq br) {
+    return br >= 0 && g.attacks(bp, br, wk, bk, wq);
+}
+inline bool kqkbbBlackChecked(const Geometry& g, Sq wk, Sq bk, Sq wq, Sq b1, Sq b2) {
+    return wq >= 0 && g.attacks(Piece::Queen, wq, bk, wk, b1, b2);
+}
+inline bool kqkbbWhiteChecked(const Geometry& g, Sq wk, Sq bk, Sq wq, Sq b1, Sq b2) {
+    return (b1 >= 0 && g.attacks(Piece::Bishop, b1, wk, bk, wq, b2)) ||
+           (b2 >= 0 && g.attacks(Piece::Bishop, b2, wk, bk, wq, b1));
+}
+
 // The raw move generators, exposed so a test can compare them against an
 // independent implementation.  fn(wk, bk, wq, br, captured); a captured man's
 // square is -1.
-void kqkrGenWhiteRaw(const Geometry& g, Piece bp, Sq wk, Sq bk, Sq wq, Sq br,
+void kqkrGenWhiteRaw(const Geometry& g, Piece wp, Piece bp, Sq wk, Sq bk, Sq wq, Sq br,
                      const std::function<void(Sq, Sq, Sq, Sq, bool)>& fn);
-void kqkrGenBlackRaw(const Geometry& g, Piece bp, Sq wk, Sq bk, Sq wq, Sq br,
+void kqkrGenBlackRaw(const Geometry& g, Piece wp, Piece bp, Sq wk, Sq bk, Sq wq, Sq br,
                      const std::function<void(Sq, Sq, Sq, Sq, bool)>& fn);
 
 // Walks the legal moves of a KQKR position, reporting each successor and the
@@ -331,6 +420,12 @@ public:
     // Recomputes every entry from its successors with the forward move
     // generator alone.  Returns the number of mismatches.
     U64 verify(int threads, bool progress) const;
+
+    // On-disk form; see io.cpp.  The two conversions are NOT in the file --
+    // they are tables in their own right and are loaded or built beside it.
+    void save(const std::string& path, bool rle) const;
+    static std::unique_ptr<TableKQKBB> load(const std::string& path);
+
     // Signed value, White-relative; see kqkbb.cpp for the encoding.
     int16_t valueAt(const PosBB& p, bool whiteToMove) const;
 };
@@ -612,6 +707,17 @@ struct MixedStats {
     int deepestWhite = 0, deepestBlack = 0;
     std::vector<Sq> posWhite, posBlack;
     U64 quiet = 0, quietWinW = 0, quietWinB = 0;
+    // The quiet placements split the same way as the whole-board rows above,
+    // White-relative, one row per side to move.  quietWinW/quietWinB stay
+    // because the explorer already reads them; these are the full breakdown
+    // the statistics file wants, and qwWin is the same number as quietWinW.
+    U64 qwWin = 0, qwDraw = 0, qwLoss = 0;
+    U64 qbWin = 0, qbDraw = 0, qbLoss = 0;
+    // The deepest White win among the quiet placements, which is what the
+    // browser explorer opens on; see KingsStats for why the deepest win
+    // outright is the wrong position to show.
+    int deepestWhiteQuiet = 0;
+    std::vector<Sq> posWhiteQuiet;
     U64 sub0Win = 0, sub0Draw = 0, sub0Loss = 0;
     U64 sub1Win = 0, sub1Draw = 0, sub1Loss = 0;
     int sub0Deep = 0, sub1Deep = 0;
@@ -620,8 +726,65 @@ struct MixedStats {
     double seconds = 0;
 };
 
+// `store`, when not empty, is a directory of .mx files: a configuration found
+// there is read rather than solved, and one that is solved is written.
 int runMixed(int n, int whitePiece0, int whitePiece1, int blackPiece,
-             int threads, bool wantLine, bool wantQuiet, MixedStats& out);
+             int threads, bool wantLine, bool wantQuiet, MixedStats& out,
+             const std::string& store = "");
+
+// One legal move of a mixed position.  A white man Black has taken is -1 in
+// the placement that follows, and `ends` means the mover took the opponent's
+// last man.  `value` is mover-relative, for the side to move in the successor.
+struct MixedMove {
+    Sq   from = -1, to = -1;
+    int  mover = 0;           // 0 or 1 for White's two men, 0 for Black's one
+    bool capture = false;
+    bool ends    = false;
+    Sq   w0 = -1, w1 = -1, b = -1;
+    int16_t value = 0;
+};
+
+// `runMixed` solves, counts and prints in one pass and keeps nothing, which is
+// all the command line ever wanted.  The browser explorer wants the opposite:
+// solve once and then answer many probes, following material down the lattice
+// as men fall.  This holds the same three tables the command builds -- the
+// pair against the man, and the two one-man tables the pair converts into --
+// and answers from them.
+class TableMixed {
+public:
+    TableMixed(int edge, int whitePiece0, int whitePiece1, int blackPiece);
+    ~TableMixed();
+    TableMixed(const TableMixed&) = delete;
+    TableMixed& operator=(const TableMixed&) = delete;
+
+    // `store`, when not empty, is a directory of .mx files: the configuration
+    // is read from there when it is present and written there when it is not.
+    // The browser explorer passes its --tables directory, which is what stops
+    // it re-solving a table that is already on the drive.
+    void generate(int threads, const std::string& store = "");
+
+    // Mover-relative value: > 0 the side to move wins in that many plies, < 0
+    // it loses in that many, 0 drawn.  A white man Black has already taken is
+    // passed as -1, which selects the one-man table it converted into.
+    int16_t probe(Sq w0, Sq w1, Sq b, bool whiteToMove) const;
+    std::vector<MixedMove> moves(Sq w0, Sq w1, Sq b, bool whiteToMove) const;
+    // Quiet: no capture available to either side, whoever is to move.
+    bool quiet(Sq w0, Sq w1, Sq b) const;
+    // The deepest White win from a quiet placement with White to move, or
+    // false when White has no win from one.  Both white men are still on.
+    bool deepestQuiet(Sq& w0, Sq& w1, Sq& b, int& plies) const;
+    // True when this table came out of a .mx file rather than being solved.
+    bool fromStore() const;
+    // The same without the quiet test, which is what the explorer opens on
+    // when a board is too small to hold a quiet win at all: on 3 x 3 a queen
+    // bears on every square, so KQ vs N has no quiet placement whatever and
+    // the quiet scan comes back empty.
+    bool deepestAny(Sq& w0, Sq& w1, Sq& b, int& plies) const;
+
+    struct Impl;
+private:
+    std::unique_ptr<Impl> p;
+};
 
 struct KingsStats {
     int n = 0, w = 0, b = 0;
@@ -632,9 +795,41 @@ struct KingsStats {
     U64 bWin = 0, bDraw = 0, bLoss = 0;
     int deepestWhite = 0, deepestBlack = 0;   // plies
     std::vector<Sq> posWhite, posBlack;       // w white squares, then b black
+    // The same restricted to QUIET placements -- no man of either side
+    // standing where an enemy man could take it.  The deepest win outright is
+    // often one where something already hangs, which reads as a puzzle with
+    // the answer given away; the explorer in serve.cpp opens on this instead.
+    int deepestWhiteQuiet = 0;
+    std::vector<Sq> posWhiteQuiet;
+    int deepestBlackQuiet = 0;
+    std::vector<Sq> posBlackQuiet;
+    // The quiet census proper.  The two deepest-quiet figures above come from
+    // a monotone filter -- the quiet test runs only on a win already deeper
+    // than the best quiet one so far -- which is why they cost almost nothing
+    // and why they cannot also yield counts: most placements are never tested.
+    // Counting quiet placements means testing every one of them, two move
+    // generations apiece, so the full pass is opt-in and these fields mean
+    // nothing unless `quietCensus` is set.
+    bool quietCensus = false;
+    U64 quietPositions = 0;                  // orbit weighted, one side to move
+    U64 qwWin = 0, qwDraw = 0, qwLoss = 0;   // White-relative, white to move
+    U64 qbWin = 0, qbDraw = 0, qbLoss = 0;   // White-relative, black to move
     double seconds = 0;
     U64  mismatches = 0;
     bool verified = false;
+};
+
+// One legal move of a capture-rules kings position, with the placement it
+// leaves and what that placement is worth.  `ends` means it took the
+// opponent's last man, which wins on the spot and so has no successor inside
+// the lattice; `value` is then meaningless.  Otherwise `value` is the value of
+// (W, B) with the OTHER side to move, mover-relative as everywhere here.
+struct KingsMove {
+    Sq   from = -1, to = -1;
+    bool capture = false;
+    bool ends    = false;
+    std::vector<Sq> W, B;     // the placement it leaves, each sorted
+    int16_t value = 0;
 };
 
 class TableKings {
@@ -649,17 +844,30 @@ public:
     TableKings& operator=(const TableKings&) = delete;
 
     void generate(int threads, bool progress);
-    void census(int threads, bool verify);
+    void census(int threads, bool verify, bool quietStats = false);
 
     // Use `dir` as a store of .tb files: any table of the lattice already
     // there is mapped and used as it stands, and any table solved here is
     // written back.  `verify` checks the payload hash on the way in.
     void store(const std::string& dir, bool verify);
 
+    // How many tables of the lattice were taken off the store as they stood
+    // and how many this run computed.  The two sum to the size of the lattice,
+    // W * B, and the explorer reports them so that "it came off the drive" is
+    // a checkable statement rather than an assumption.
+    void tableCounts(int& mapped, int& built) const;
+
     const KingsStats& stats() const;              // the (w, b) table itself
     const KingsStats& subStats(int w, int b) const;   // one of its conversions
 
     int16_t     probe(const std::vector<Sq>& W, const std::vector<Sq>& B, bool whiteToMove) const;
+    // Every legal move, each already priced.  The placements may be shorter
+    // than (W, B): material falls on both sides here, and `probe` follows it
+    // down the lattice, so a successor of any material answers.
+    std::vector<KingsMove> moves(const std::vector<Sq>& W, const std::vector<Sq>& B,
+                                 bool whiteToMove) const;
+    // Quiet: no capture available to either side, whoever is to move.
+    bool        quiet(const std::vector<Sq>& W, const std::vector<Sq>& B) const;
     std::string line(const std::vector<Sq>& W, const std::vector<Sq>& B,
                      bool whiteToMove, int cap) const;
     std::string square(Sq s) const;

@@ -1,0 +1,61 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>xegtb board</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="style.css">
+
+<header>
+  <a class="back" href="index.html">&larr; all configurations</a>
+  <h1 id="label">&hellip;</h1>
+  <p id="title"></p>
+</header>
+
+<main>
+  <div class="cols">
+    <div>
+      <div class="boardwrap">
+        <div class="boardrow">
+          <div class="rankcol coords" id="ranks"></div>
+          <div class="board" id="board"></div>
+        </div>
+        <div class="filerow coords" id="files"></div>
+      </div>
+
+      <div class="controls">
+        <label>
+          board size
+          <input type="range" id="n" min="3" max="12" step="1" value="8">
+          <span class="nval" id="nval">8 &times; 8</span>
+        </label>
+        <span class="sub" id="ndisk"></span>
+        <button id="undo">&larr; take back</button>
+        <button id="best">play the best move</button>
+        <button id="run">play it out</button>
+        <button id="reset">reset</button>
+        <button id="swap">give the move to the other side</button>
+      </div>
+      <p class="sub" id="status"></p>
+    </div>
+
+    <div>
+      <div class="panel">
+        <h3>the position</h3>
+        <div class="verdict" id="verdict">&hellip;</div>
+        <div class="sub" id="detail"></div>
+        <div class="sub" id="posline" style="margin-top:9px;font-variant-numeric:tabular-nums"></div>
+      </div>
+
+      <div class="panel">
+        <h3 id="moveshead">moves</h3>
+        <div class="moves" id="moves"></div>
+      </div>
+
+      <div class="panel" id="histpanel" hidden>
+        <h3>played from the opening position</h3>
+        <div class="hist" id="hist"></div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<script src="app.js"></script>

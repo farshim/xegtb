@@ -1,0 +1,48 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>xegtb -- normal chess</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="style.css">
+
+<header>
+  <a class="back" href="index.html">&larr; both rule sets</a>
+  <h1>Normal chess on an <i>n</i> &times; <i>n</i> board</h1>
+  <p>
+    The ordinary rules: one king a side, a king that cannot be captured,
+    checkmate to win and stalemate a draw. Every material of at most five men
+    is listed below, whether or not anything here can solve it &mdash; because
+    most of them cannot be solved here, and a page that showed only the
+    successes would not say so.
+  </p>
+</header>
+
+<main>
+  <div id="sum" class="busy">counting</div>
+  <input id="filter" class="filter" placeholder="filter -- KRK, KQKBB, bishop...">
+  <div id="cov" class="busy">enumerating the materials</div>
+</main>
+
+<script src="site.js"></script>
+<script>
+fetch("api/coverage?rules=mate&men=5")
+  .then(r => r.json())
+  .then(d => {
+    const boards = d.rows.reduce((a, m) => a + m.boards.length, 0);
+    el("sum").className = "";
+    el("sum").innerHTML = `
+      <div class="cards">
+        <div class="card"><div class="label">${d.materials.toLocaleString()}</div>
+          <div class="title">materials exist</div>
+          <div class="blurb">every distinct set of men, up to five, one king a side</div></div>
+        <div class="card"><div class="label">${d.supported.toLocaleString()}</div>
+          <div class="title">have a solver</div>
+          <div class="blurb">the rest need code that does not exist yet, not a longer run</div></div>
+        <div class="card"><div class="label">${d.stored.toLocaleString()}</div>
+          <div class="title">are on the drive</div>
+          <div class="blurb">${boards.toLocaleString()} tables, every board n = 3..12</div></div>
+      </div>`;
+    renderCoverage(el("cov"), d, ["A bare black king", "Black is armed"]);
+    wireFilter(el("filter"), el("cov"));
+  })
+  .catch(e => { el("cov").className = "err"; el("cov").textContent = "could not reach the server: " + e; });
+</script>

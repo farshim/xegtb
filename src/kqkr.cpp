@@ -68,7 +68,7 @@ namespace kqk {
 // already solves.  A rook mates there and a bishop does not, but the solver
 // below does not care which -- it reads the value out of the table either way.
 Endgame subEndgame(Endgame eg) {
-    return eg == Endgame::KQKB ? Endgame::KBK : Endgame::KRK;
+    return bareEndgameOf(blackPieceOf(eg));
 }
 
 namespace {
@@ -106,11 +106,11 @@ struct Timer {
 // Geometry::attacks treats a negative blocker as absent, so the same call
 // serves before and after a capture.
 // ---------------------------------------------------------------------------
-inline bool blackChecked(const Geometry& g, Sq wk, Sq bk, Sq wq, Sq br) {
-    return wq >= 0 && g.attacks(Piece::Queen, wq, bk, wk, br);
+inline bool blackChecked(const Geometry& g, Piece wp, Sq wk, Sq bk, Sq wq, Sq br) {
+    return kqkrBlackChecked(g, wp, wk, bk, wq, br);
 }
 inline bool whiteChecked(const Geometry& g, Piece bp, Sq wk, Sq bk, Sq wq, Sq br) {
-    return br >= 0 && g.attacks(bp, br, wk, bk, wq);
+    return kqkrWhiteChecked(g, bp, wk, bk, wq, br);
 }
 
 // ---------------------------------------------------------------------------
@@ -135,6 +135,51 @@ inline bool kingHasSquare(const Geometry& g, Sq from, Sq own) {
         }
     return false;
 }
+// Every move of ONE man: the rays of a slider or the jumps of a knight, with
+// `own` blocking, the enemy king blocking (it can never legally be taken, and
+// a position where it could be is not in this table), and `prey` capturable.
+// Black's man has been a parameter here since the file was written; White's is
+// one now too, and that is the whole of what made this solver "KQKR" rather
+// than "one white man against one black man".
+template <class F>
+inline void manMoves(const Geometry& g, Piece p, Sq from, Sq own, Sq king, Sq prey,
+                     F&& fn) {
+    const int f0 = g.file(from), r0 = g.rank(from);
+    if (p == Piece::Knight) {
+        for (int d = 0; d < 8; ++d) {
+            const int f = f0 + NF[d], r = r0 + NR[d];
+            if (!g.onBoard(f, r)) continue;
+            const Sq t = g.sq(f, r);
+            if (t == own || t == king) continue;
+            fn(t, t == prey);
+        }
+        return;
+    }
+    for (int d = dirBegin(p); d < 8; d += dirStep(p)) {
+        int f = f0 + DIR_F[d], r = r0 + DIR_R[d];
+        while (g.onBoard(f, r)) {
+            const Sq t = g.sq(f, r);
+            if (t == own || t == king) break;
+            const bool cap = (t == prey);
+            fn(t, cap);
+            if (cap) break;
+            f += DIR_F[d]; r += DIR_R[d];
+        }
+    }
+}
+
+// The same man, retracted: where it could have come from, nothing capturable
+// because a predecessor under a capture would have five men.
+template <class F>
+inline void manRetract(const Geometry& g, Piece p, Sq from, Sq o0, Sq o1, Sq o2, F&& fn) {
+    switch (p) {
+        case Piece::Rook:   forEachMove<Piece::Rook>  (g, from, o0, o1, o2, fn); break;
+        case Piece::Bishop: forEachMove<Piece::Bishop>(g, from, o0, o1, o2, fn); break;
+        case Piece::Knight: forEachMove<Piece::Knight>(g, from, o0, o1, o2, fn); break;
+        default:            forEachMove<Piece::Queen> (g, from, o0, o1, o2, fn); break;
+    }
+}
+
 inline bool sliderHasSquare(const Geometry& g, Piece p, Sq from, Sq own) {
     const int f0 = g.file(from), r0 = g.rank(from);
     for (int d = dirBegin(p); d < 8; d += dirStep(p)) {
@@ -143,11 +188,20 @@ inline bool sliderHasSquare(const Geometry& g, Piece p, Sq from, Sq own) {
     }
     return false;
 }
-inline bool whiteMobile(const Geometry& g, Sq wk, Sq wq) {
-    return kingHasSquare(g, wk, wq) || sliderHasSquare(g, Piece::Queen, wq, wk);
+inline bool manHasSquare(const Geometry& g, Piece p, Sq from, Sq own) {
+    if (p != Piece::Knight) return sliderHasSquare(g, p, from, own);
+    const int f0 = g.file(from), r0 = g.rank(from);
+    for (int d = 0; d < 8; ++d) {
+        const int f = f0 + NF[d], r = r0 + NR[d];
+        if (g.onBoard(f, r) && g.sq(f, r) != own) return true;
+    }
+    return false;
+}
+inline bool whiteMobile(const Geometry& g, Piece wp, Sq wk, Sq wq) {
+    return kingHasSquare(g, wk, wq) || manHasSquare(g, wp, wq, wk);
 }
 inline bool blackMobile(const Geometry& g, Piece bp, Sq bk, Sq br) {
-    return kingHasSquare(g, bk, br) || sliderHasSquare(g, bp, br, bk);
+    return kingHasSquare(g, bk, br) || manHasSquare(g, bp, br, bk);
 }
 
 // The value of a position in which the side to move has no legal chess move.
@@ -168,7 +222,8 @@ inline int16_t terminal(bool capture, bool inCheck, bool mobile, int16_t loss,
 // which case that man's square is -1.  Only legal moves are produced.
 // ---------------------------------------------------------------------------
 template <class F>
-inline void genWhite(const Geometry& g, Piece bp, Sq wk, Sq bk, Sq wq, Sq br, F&& fn) {
+inline void genWhite(const Geometry& g, Piece wp, Piece bp, Sq wk, Sq bk, Sq wq, Sq br,
+                     F&& fn) {
     // king
     const int f0 = g.file(wk), r0 = g.rank(wk);
     for (int df = -1; df <= 1; ++df)
@@ -177,30 +232,22 @@ inline void genWhite(const Geometry& g, Piece bp, Sq wk, Sq bk, Sq wq, Sq br, F&
             int f = f0 + df, r = r0 + dr;
             if (!g.onBoard(f, r)) continue;
             Sq t = g.sq(f, r);
-            if (t == wq) continue;                       // own queen
+            if (t == wq) continue;                       // own man
             if (g.kingsTouch(t, bk)) continue;           // into the black king
             Sq nbr = (t == br) ? -1 : br;
             if (whiteChecked(g, bp, t, bk, wq, nbr)) continue;
             fn(t, bk, wq, nbr, nbr < 0);
         }
-    // queen
-    const int qf = g.file(wq), qr = g.rank(wq);
-    for (int d = 0; d < 8; ++d) {
-        int f = qf + DIR_F[d], r = qr + DIR_R[d];
-        while (g.onBoard(f, r)) {
-            Sq t = g.sq(f, r);
-            if (t == wk || t == bk) break;               // blocked (bk unreachable: illegal)
-            bool cap = (t == br);
-            Sq nbr = cap ? -1 : br;
-            if (!whiteChecked(g, bp, wk, bk, t, nbr)) fn(wk, bk, t, nbr, cap);
-            if (cap) break;
-            f += DIR_F[d]; r += DIR_R[d];
-        }
-    }
+    // White's man
+    manMoves(g, wp, wq, wk, bk, br, [&](Sq t, bool cap) {
+        const Sq nbr = cap ? -1 : br;
+        if (!whiteChecked(g, bp, wk, bk, t, nbr)) fn(wk, bk, t, nbr, cap);
+    });
 }
 
 template <class F>
-inline void genBlack(const Geometry& g, Piece bp, Sq wk, Sq bk, Sq wq, Sq br, F&& fn) {
+inline void genBlack(const Geometry& g, Piece wp, Piece bp, Sq wk, Sq bk, Sq wq, Sq br,
+                     F&& fn) {
     // king
     const int f0 = g.file(bk), r0 = g.rank(bk);
     for (int df = -1; df <= 1; ++df)
@@ -209,28 +256,17 @@ inline void genBlack(const Geometry& g, Piece bp, Sq wk, Sq bk, Sq wq, Sq br, F&
             int f = f0 + df, r = r0 + dr;
             if (!g.onBoard(f, r)) continue;
             Sq t = g.sq(f, r);
-            if (t == br) continue;                       // own rook
+            if (t == br) continue;                       // own man
             if (g.kingsTouch(wk, t)) continue;
             Sq nwq = (t == wq) ? -1 : wq;
-            if (blackChecked(g, wk, t, nwq, br)) continue;
+            if (blackChecked(g, wp, wk, t, nwq, br)) continue;
             fn(wk, t, nwq, br, nwq < 0);
         }
-    // Black's piece.  The orthogonal rays are the even entries of the
-    // direction table and the diagonal ones the odd entries, so a rook starts
-    // at 0 and a bishop at 1; both stride by two.
-    const int rf = g.file(br), rr = g.rank(br);
-    for (int d = dirBegin(bp); d < 8; d += dirStep(bp)) {
-        int f = rf + DIR_F[d], r = rr + DIR_R[d];
-        while (g.onBoard(f, r)) {
-            Sq t = g.sq(f, r);
-            if (t == bk || t == wk) break;               // blocked (wk unreachable: illegal)
-            bool cap = (t == wq);
-            Sq nwq = cap ? -1 : wq;
-            if (!blackChecked(g, wk, bk, nwq, t)) fn(wk, bk, nwq, t, cap);
-            if (cap) break;
-            f += DIR_F[d]; r += DIR_R[d];
-        }
-    }
+    // Black's man
+    manMoves(g, bp, br, bk, wk, wq, [&](Sq t, bool cap) {
+        const Sq nwq = cap ? -1 : wq;
+        if (!blackChecked(g, wp, wk, bk, nwq, t)) fn(wk, bk, nwq, t, cap);
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -239,7 +275,8 @@ inline void genBlack(const Geometry& g, Piece bp, Sq wk, Sq bk, Sq wq, Sq br, F&
 // wq, br)` receives a legal predecessor with the other side to move.
 // ---------------------------------------------------------------------------
 template <class F>
-inline void retractWhite(const Geometry& g, Piece bp, Sq wk, Sq bk, Sq wq, Sq br, F&& fn) {
+inline void retractWhite(const Geometry& g, Piece wp, Piece bp, Sq wk, Sq bk, Sq wq,
+                         Sq br, F&& fn) {
     // the white king came from an adjacent empty square
     const int f0 = g.file(wk), r0 = g.rank(wk);
     for (int df = -1; df <= 1; ++df)
@@ -250,18 +287,19 @@ inline void retractWhite(const Geometry& g, Piece bp, Sq wk, Sq bk, Sq wq, Sq br
             Sq t = g.sq(f, r);
             if (t == wq || t == br || t == bk) continue;
             if (g.kingsTouch(t, bk)) continue;
-            if (blackChecked(g, t, bk, wq, br)) continue;   // black in check, white to move
+            if (blackChecked(g, wp, t, bk, wq, br)) continue;  // black in check, white to move
             fn(t, bk, wq, br);
         }
-    // the queen came from any square she could have travelled from
-    forEachMove<Piece::Queen>(g, wq, wk, bk, br, [&](Sq t) {
-        if (!blackChecked(g, wk, bk, t, br)) fn(wk, bk, t, br);
+    // White's man came from any square it could have travelled from
+    manRetract(g, wp, wq, wk, bk, br, [&](Sq t) {
+        if (!blackChecked(g, wp, wk, bk, t, br)) fn(wk, bk, t, br);
         return true;
     });
 }
 
 template <class F>
-inline void retractBlack(const Geometry& g, Piece bp, Sq wk, Sq bk, Sq wq, Sq br, F&& fn) {
+inline void retractBlack(const Geometry& g, Piece wp, Piece bp, Sq wk, Sq bk, Sq wq,
+                         Sq br, F&& fn) {
     const int f0 = g.file(bk), r0 = g.rank(bk);
     for (int df = -1; df <= 1; ++df)
         for (int dr = -1; dr <= 1; ++dr) {
@@ -278,8 +316,7 @@ inline void retractBlack(const Geometry& g, Piece bp, Sq wk, Sq bk, Sq wq, Sq br
         if (!whiteChecked(g, bp, wk, bk, wq, t)) fn(wk, bk, wq, t);
         return true;
     };
-    if (bp == Piece::Bishop) forEachMove<Piece::Bishop>(g, br, wk, bk, wq, back);
-    else                     forEachMove<Piece::Rook>  (g, br, wk, bk, wq, back);
+    manRetract(g, bp, br, wk, bk, wq, back);
 }
 
 // ---------------------------------------------------------------------------
@@ -311,13 +348,13 @@ struct Conv {
 } // namespace
 
 // Exposed for the differential move-generator test in tests/.
-void kqkrGenWhiteRaw(const Geometry& g, Piece bp, Sq wk, Sq bk, Sq wq, Sq br,
+void kqkrGenWhiteRaw(const Geometry& g, Piece wp, Piece bp, Sq wk, Sq bk, Sq wq, Sq br,
                      const std::function<void(Sq, Sq, Sq, Sq, bool)>& fn) {
-    genWhite(g, bp, wk, bk, wq, br, fn);
+    genWhite(g, wp, bp, wk, bk, wq, br, fn);
 }
-void kqkrGenBlackRaw(const Geometry& g, Piece bp, Sq wk, Sq bk, Sq wq, Sq br,
+void kqkrGenBlackRaw(const Geometry& g, Piece wp, Piece bp, Sq wk, Sq bk, Sq wq, Sq br,
                      const std::function<void(Sq, Sq, Sq, Sq, bool)>& fn) {
-    genBlack(g, bp, wk, bk, wq, br, fn);
+    genBlack(g, wp, bp, wk, bk, wq, br, fn);
 }
 
 // ---------------------------------------------------------------------------
@@ -332,6 +369,7 @@ int16_t TableKQKR::valueAt(const Pos& p, bool whiteToMove) const {
 void TableKQKR::generate(int threads, bool progress) {
     const Geometry& g = geo;
     const Piece bp = blackPieceOf(mat.eg);
+    const Piece wp = whitePieceOf(mat.eg);
     const U32 npc = idx.npc;
     const U64 nkk = idx.nkk;
     Timer clock;
@@ -344,7 +382,7 @@ void TableKQKR::generate(int threads, bool progress) {
     // placements, because a stalemate is a win there too, and K+B vs K stops
     // being a dead draw at all -- a lone bishop and king can take a bare
     // king's last square away.
-    Table kqk(n, Endgame::KQK);
+    Table kqk(n, bareEndgameOf(whitePieceOf(mat.eg)));
     kqk.stalemateLoss = stalemateLoss; kqk.generate(threads, false);
     Table sub(n, subEndgame(mat.eg));
     sub.stalemateLoss = stalemateLoss; sub.generate(threads, false);
@@ -371,9 +409,9 @@ void TableKQKR::generate(int threads, bool progress) {
                 const Sq wq = p.wp[0], br = p.wp[1];
 
                 // White to move: legal unless Black stands in check.
-                if (!blackChecked(g, wk, bk, wq, br)) {
+                if (!blackChecked(g, wp, wk, bk, wq, br)) {
                     int moves = 0; int16_t best = VK_UNKNOWN;
-                    genWhite(g, bp, wk, bk, wq, br, [&](Sq a, Sq bb, Sq q, Sq r, bool cap) {
+                    genWhite(g, wp, bp, wk, bk, wq, br, [&](Sq a, Sq bb, Sq q, Sq r, bool cap) {
                         ++moves;
                         if (!cap) return;
                         int16_t v = conv.afterWhiteTakes(a, bb, q);
@@ -384,7 +422,7 @@ void TableKQKR::generate(int threads, bool progress) {
                         const bool chk = whiteChecked(g, bp, wk, bk, wq, br);
                         bool imm = false;
                         w[base + pc] = terminal(stalemateLoss, chk,
-                                                whiteMobile(g, wk, wq), bMate(0), imm);
+                                                whiteMobile(g, wp, wk, wq), bMate(0), imm);
                         if (chk) ++lw;
                         else if (isLoss(w[base + pc])) ++lsw;
                         if (imm) ++limm;
@@ -399,7 +437,7 @@ void TableKQKR::generate(int threads, bool progress) {
                 // Black to move: legal unless White stands in check.
                 if (!whiteChecked(g, bp, wk, bk, wq, br)) {
                     int moves = 0; int16_t best = VK_UNKNOWN;
-                    genBlack(g, bp, wk, bk, wq, br, [&](Sq a, Sq bb, Sq q, Sq r, bool cap) {
+                    genBlack(g, wp, bp, wk, bk, wq, br, [&](Sq a, Sq bb, Sq q, Sq r, bool cap) {
                         ++moves;
                         if (!cap) return;
                         int16_t v = conv.afterBlackTakes(a, bb, r);
@@ -407,7 +445,7 @@ void TableKQKR::generate(int threads, bool progress) {
                         if (isLoss(v) && (best == VK_UNKNOWN || v > best)) best = v;
                     });
                     if (moves == 0) {
-                        const bool chk = blackChecked(g, wk, bk, wq, br);
+                        const bool chk = blackChecked(g, wp, wk, bk, wq, br);
                         bool imm = false;
                         b[base + pc] = terminal(stalemateLoss, chk,
                                                 blackMobile(g, bp, bk, br), wMate(0), imm);
@@ -464,7 +502,7 @@ void TableKQKR::generate(int threads, bool progress) {
                         if (!srcW && !srcB) continue;
                         idx.decode(pc, p.wp);
                         if (srcW) {   // White mates in d-1 with Black to move
-                            retractWhite(g, bp, wk, bk, p.wp[0], p.wp[1],
+                            retractWhite(g, wp, bp, wk, bk, p.wp[0], p.wp[1],
                                          [&](Sq a, Sq bb, Sq q, Sq r) {
                                 Pos t; t.wk = a; t.bk = bb; t.wp[0] = q; t.wp[1] = r;
                                 U64 s;
@@ -477,7 +515,7 @@ void TableKQKR::generate(int threads, bool progress) {
                             });
                         }
                         if (srcB) {   // Black mates in d-1 with White to move
-                            retractBlack(g, bp, wk, bk, p.wp[0], p.wp[1],
+                            retractBlack(g, wp, bp, wk, bk, p.wp[0], p.wp[1],
                                          [&](Sq a, Sq bb, Sq q, Sq r) {
                                 Pos t; t.wk = a; t.bk = bb; t.wp[0] = q; t.wp[1] = r;
                                 U64 s;
@@ -512,14 +550,14 @@ void TableKQKR::generate(int threads, bool progress) {
                         if (!srcW && !srcB) continue;
                         idx.decode(pc, p.wp);
                         if (srcW) {   // candidates: black-to-move losses at ply d
-                            retractBlack(g, bp, wk, bk, p.wp[0], p.wp[1],
+                            retractBlack(g, wp, bp, wk, bk, p.wp[0], p.wp[1],
                                          [&](Sq a, Sq bb, Sq q, Sq r) {
                                 Pos t; t.wk = a; t.bk = bb; t.wp[0] = q; t.wp[1] = r;
                                 U64 s;
                                 if (!idx.slotOf(t, s)) return;
                                 if (aload(B, s) != VK_UNKNOWN) return;
                                 int worst = -1; bool all = true;
-                                genBlack(g, bp, a, bb, q, r,
+                                genBlack(g, wp, bp, a, bb, q, r,
                                          [&](Sq a2, Sq b2, Sq q2, Sq r2, bool cap) {
                                     if (!all) return;
                                     int16_t v;
@@ -537,14 +575,14 @@ void TableKQKR::generate(int threads, bool progress) {
                             });
                         }
                         if (srcB) {   // candidates: white-to-move losses at ply d
-                            retractWhite(g, bp, wk, bk, p.wp[0], p.wp[1],
+                            retractWhite(g, wp, bp, wk, bk, p.wp[0], p.wp[1],
                                          [&](Sq a, Sq bb, Sq q, Sq r) {
                                 Pos t; t.wk = a; t.bk = bb; t.wp[0] = q; t.wp[1] = r;
                                 U64 s;
                                 if (!idx.slotOf(t, s)) return;
                                 if (aload(W, s) != VK_UNKNOWN) return;
                                 int worst = -1; bool all = true;
-                                genWhite(g, bp, a, bb, q, r,
+                                genWhite(g, wp, bp, a, bb, q, r,
                                          [&](Sq a2, Sq b2, Sq q2, Sq r2, bool cap) {
                                     if (!all) return;
                                     int16_t v;
@@ -656,15 +694,28 @@ void TableKQKR::generate(int threads, bool progress) {
     st.seconds = clock.s();
 }
 
+// Both conversions are played under the same rules as the table itself; see
+// the note in verify() for what that changes.
+void TableKQKR::buildSubTables(int threads, bool progress) const {
+    if (!convQ) {
+        convQ = std::make_unique<Table>(n, bareEndgameOf(whitePieceOf(mat.eg)));
+        convQ->stalemateLoss = stalemateLoss;
+        convQ->generate(threads, progress);
+    }
+    if (!convB) {
+        convB = std::make_unique<Table>(n, subEndgame(mat.eg));
+        convB->stalemateLoss = stalemateLoss;
+        convB->generate(threads, progress);
+    }
+}
+
 void kqkrMoves(const TableKQKR& t, const Pos& p, bool whiteToMove,
                const std::function<void(const Pos&, bool, int16_t)>& fn) {
     const Geometry& g = t.geo;
     const Piece bp = blackPieceOf(t.mat.eg);
-    Table kqk(t.n, Endgame::KQK);
-    kqk.stalemateLoss = t.stalemateLoss; kqk.generate(1, false);
-    Table sub(t.n, subEndgame(t.mat.eg));
-    sub.stalemateLoss = t.stalemateLoss; sub.generate(1, false);
-    const Conv conv{kqk, sub};
+    const Piece wp = whitePieceOf(t.mat.eg);
+    t.buildSubTables(1, false);
+    const Conv conv{*t.convQ, *t.convB};
     auto emit = [&](Sq a, Sq b2, Sq q, Sq r, bool cap, bool white) {
         Pos u; u.wk = a; u.bk = b2; u.wp[0] = q; u.wp[1] = r;
         int16_t v;
@@ -673,10 +724,10 @@ void kqkrMoves(const TableKQKR& t, const Pos& p, bool whiteToMove,
         fn(u, cap, v);
     };
     if (whiteToMove)
-        genWhite(g, bp, p.wk, p.bk, p.wp[0], p.wp[1],
+        genWhite(g, wp, bp, p.wk, p.bk, p.wp[0], p.wp[1],
                  [&](Sq a, Sq b2, Sq q, Sq r, bool cap) { emit(a, b2, q, r, cap, true); });
     else
-        genBlack(g, bp, p.wk, p.bk, p.wp[0], p.wp[1],
+        genBlack(g, wp, bp, p.wk, p.bk, p.wp[0], p.wp[1],
                  [&](Sq a, Sq b2, Sq q, Sq r, bool cap) { emit(a, b2, q, r, cap, false); });
 }
 
@@ -687,6 +738,7 @@ void kqkrMoves(const TableKQKR& t, const Pos& p, bool whiteToMove,
 U64 TableKQKR::verify(int threads, bool progress) const {
     const Geometry& g = geo;
     const Piece bp = blackPieceOf(mat.eg);
+    const Piece wp = whitePieceOf(mat.eg);
     const U32 npc = idx.npc;
     const U64 nkk = idx.nkk;
     // Both conversions are played under the same rules as the table itself.
@@ -694,7 +746,7 @@ U64 TableKQKR::verify(int threads, bool progress) const {
     // placements, because a stalemate is a win there too, and K+B vs K stops
     // being a dead draw at all -- a lone bishop and king can take a bare
     // king's last square away.
-    Table kqk(n, Endgame::KQK);
+    Table kqk(n, bareEndgameOf(whitePieceOf(mat.eg)));
     kqk.stalemateLoss = stalemateLoss; kqk.generate(threads, false);
     Table sub(n, subEndgame(mat.eg));
     sub.stalemateLoss = stalemateLoss; sub.generate(threads, false);
@@ -717,7 +769,7 @@ U64 TableKQKR::verify(int threads, bool progress) const {
                 for (int side = 0; side < 2; ++side) {
                     const bool wtm = (side == 0);
                     const int16_t stored = wtm ? w[base + pc] : b[base + pc];
-                    const bool legal = wtm ? !blackChecked(g, wk, bk, wq, br)
+                    const bool legal = wtm ? !blackChecked(g, wp, wk, bk, wq, br)
                                            : !whiteChecked(g, bp, wk, bk, wq, br);
                     if (!legal) { if (stored != VK_DEAD) ++local; continue; }
 
@@ -739,7 +791,7 @@ U64 TableKQKR::verify(int threads, bool progress) const {
                         }
                     };
                     if (wtm)
-                        genWhite(g, bp, wk, bk, wq, br,
+                        genWhite(g, wp, bp, wk, bk, wq, br,
                                  [&](Sq a, Sq b2, Sq q, Sq r, bool cap) {
                             if (cap) { see(conv.afterWhiteTakes(a, b2, q)); return; }
                             Pos u; u.wk = a; u.bk = b2; u.wp[0] = q; u.wp[1] = r;
@@ -747,7 +799,7 @@ U64 TableKQKR::verify(int threads, bool progress) const {
                             see(b[s]);
                         });
                     else
-                        genBlack(g, bp, wk, bk, wq, br,
+                        genBlack(g, wp, bp, wk, bk, wq, br,
                                  [&](Sq a, Sq b2, Sq q, Sq r, bool cap) {
                             if (cap) { see(conv.afterBlackTakes(a, b2, r)); return; }
                             Pos u; u.wk = a; u.bk = b2; u.wp[0] = q; u.wp[1] = r;
@@ -758,8 +810,8 @@ U64 TableKQKR::verify(int threads, bool progress) const {
                     int16_t want;
                     if (moves == 0) {
                         const bool inCheck = wtm ? whiteChecked(g, bp, wk, bk, wq, br)
-                                                 : blackChecked(g, wk, bk, wq, br);
-                        const bool mobile = wtm ? whiteMobile(g, wk, wq)
+                                                 : blackChecked(g, wp, wk, bk, wq, br);
+                        const bool mobile = wtm ? whiteMobile(g, wp, wk, wq)
                                                 : blackMobile(g, bp, bk, br);
                         bool imm = false;
                         want = terminal(stalemateLoss, inCheck, mobile,
@@ -792,6 +844,7 @@ U64 TableKQKR::verify(int threads, bool progress) const {
 U64 kqkrBruteForceCheck(const TableKQKR& t, bool progress) {
     const Geometry& g = t.geo;
     const Piece bp = blackPieceOf(t.mat.eg);
+    const Piece wp = whitePieceOf(t.mat.eg);
     const bool cap = t.stalemateLoss;
     const int nsq = g.nsq;
     const U64 N = (U64)nsq * nsq * nsq * nsq;
@@ -799,7 +852,7 @@ U64 kqkrBruteForceCheck(const TableKQKR& t, bool progress) {
     auto ix = [&](Sq wk, Sq bk, Sq wq, Sq br) {
         return (((U64)wk * nsq + bk) * nsq + wq) * nsq + br;
     };
-    Table kqk(t.n, Endgame::KQK);
+    Table kqk(t.n, bareEndgameOf(whitePieceOf(t.mat.eg)));
     kqk.stalemateLoss = t.stalemateLoss; kqk.generate(1, false);
     Table sub(t.n, subEndgame(t.mat.eg));
     sub.stalemateLoss = t.stalemateLoss; sub.generate(1, false);
@@ -826,9 +879,9 @@ U64 kqkrBruteForceCheck(const TableKQKR& t, bool progress) {
     forEachPlacement([&](Sq wk, Sq bk, Sq wq, Sq br) {
         U64 i = ix(wk, bk, wq, br);
         bool imm = false;
-        if (!blackChecked(g, wk, bk, wq, br)) {
+        if (!blackChecked(g, wp, wk, bk, wq, br)) {
             int mv = 0;
-            genWhite(g, bp, wk, bk, wq, br, [&](Sq a, Sq b2, Sq q, Sq, bool cap) {
+            genWhite(g, wp, bp, wk, bk, wq, br, [&](Sq a, Sq b2, Sq q, Sq, bool cap) {
                 ++mv;
                 if (!cap) return;
                 int16_t v = conv.afterWhiteTakes(a, b2, q);
@@ -836,18 +889,18 @@ U64 kqkrBruteForceCheck(const TableKQKR& t, bool progress) {
             });
             W[i] = mv ? VK_UNKNOWN
                       : terminal(cap, whiteChecked(g, bp, wk, bk, wq, br),
-                                 whiteMobile(g, wk, wq), bMate(0), imm);
+                                 whiteMobile(g, wp, wk, wq), bMate(0), imm);
         }
         if (!whiteChecked(g, bp, wk, bk, wq, br)) {
             int mv = 0;
-            genBlack(g, bp, wk, bk, wq, br, [&](Sq a, Sq b2, Sq, Sq r, bool cap) {
+            genBlack(g, wp, bp, wk, bk, wq, br, [&](Sq a, Sq b2, Sq, Sq r, bool cap) {
                 ++mv;
                 if (!cap) return;
                 int16_t v = conv.afterBlackTakes(a, b2, r);
                 if (isLoss(v) && lossPly(v) + 1 > convCeil) convCeil = lossPly(v) + 1;
             });
             B[i] = mv ? VK_UNKNOWN
-                      : terminal(cap, blackChecked(g, wk, bk, wq, br),
+                      : terminal(cap, blackChecked(g, wp, wk, bk, wq, br),
                                  blackMobile(g, bp, bk, br), wMate(0), imm);
         }
     });
@@ -879,11 +932,11 @@ U64 kqkrBruteForceCheck(const TableKQKR& t, bool progress) {
                     }
                 };
                 if (wtm)
-                    genWhite(g, bp, wk, bk, wq, br, [&](Sq a, Sq b2, Sq q, Sq r, bool cap) {
+                    genWhite(g, wp, bp, wk, bk, wq, br, [&](Sq a, Sq b2, Sq q, Sq r, bool cap) {
                         see(cap ? conv.afterWhiteTakes(a, b2, q) : B[ix(a, b2, q, r)]);
                     });
                 else
-                    genBlack(g, bp, wk, bk, wq, br, [&](Sq a, Sq b2, Sq q, Sq r, bool cap) {
+                    genBlack(g, wp, bp, wk, bk, wq, br, [&](Sq a, Sq b2, Sq q, Sq r, bool cap) {
                         see(cap ? conv.afterBlackTakes(a, b2, r) : W[ix(a, b2, q, r)]);
                     });
                 if (wins) {
@@ -1020,6 +1073,7 @@ struct Naive {
 U64 kqkrSelfCheck(int lo, int hi, U64 trials, bool progress, Endgame eg) {
     U64 bad = 0;
     const Piece bp = blackPieceOf(eg);
+    const Piece wp = whitePieceOf(eg);
     for (int n = lo; n <= hi; ++n) {
         Geometry g(n);
         Naive nv(g, bp);
@@ -1062,9 +1116,9 @@ U64 kqkrSelfCheck(int lo, int hi, U64 trials, bool progress, Endgame eg) {
                 auto rec = [&](Sq a, Sq b, Sq q, Sq r, bool) {
                     mine.insert((((U64)(a+1) * 4096 + (b+1)) * 4096 + (q+1)) * 4096 + (r+1));
                 };
-                if (wtm) { kqkrGenWhiteRaw(g, bp, p.wk, p.bk, p.wp[0], p.wp[1], rec);
+                if (wtm) { kqkrGenWhiteRaw(g, wp, bp, p.wk, p.bk, p.wp[0], p.wp[1], rec);
                            nv.white(p.wk, p.bk, p.wp[0], p.wp[1], theirs); }
-                else     { kqkrGenBlackRaw(g, bp, p.wk, p.bk, p.wp[0], p.wp[1], rec);
+                else     { kqkrGenBlackRaw(g, wp, bp, p.wk, p.bk, p.wp[0], p.wp[1], rec);
                            nv.black(p.wk, p.bk, p.wp[0], p.wp[1], theirs); }
                 if (mine != theirs) ++mgBad;
             }

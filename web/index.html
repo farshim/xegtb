@@ -1,0 +1,155 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>xegtb -- endgame tablebases on an n x n board</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="style.css">
+
+<header>
+  <h1>Endgame tablebases on an <i>n</i> &times; <i>n</i> board</h1>
+  <p>
+    Every table here is solved exhaustively by retrograde analysis and kept on
+    disk, so a position opens rather than being computed. There are two rule
+    sets, and the same men are a different game under each &mdash; pick one.
+  </p>
+</header>
+
+<main>
+  <div id="doors" class="doors">
+    <a class="door mate" href="chess.html">
+      <div class="glyphs"><span class="man w">♚</span><span class="man w">♛</span>
+        <span style="opacity:.45">vs</span>
+        <span class="man b">♚</span><span class="man b">♜</span></div>
+      <h2>Normal chess</h2>
+      <p>One king a side, and it cannot be taken. Win by checkmate; stalemate
+         is a draw. KQK, KBNK, KQKR and the rest.</p>
+      <div class="meta"><span class="tag mate">mating rules</span>
+        <span class="tag" id="mateCount">&hellip;</span></div>
+    </a>
+    <a class="door capture" href="capture.html">
+      <div class="glyphs"><span class="man w">♚</span><span class="man w">♚</span><span class="man w">♚</span>
+        <span style="opacity:.45">vs</span>
+        <span class="man b">♞</span><span class="man b">♞</span></div>
+      <h2>Capture chess</h2>
+      <p>No check and no mate: every man can be taken, kings included, and the
+         game is won by taking the last of them. One king a side, several
+         kings, or none at all.</p>
+      <div class="meta"><span class="tag cap">capture rules</span>
+        <span class="tag" id="capCount">&hellip;</span></div>
+    </a>
+  </div>
+
+  <section id="summary">
+    <h2 class="group">What has been solved</h2>
+    <div id="sum" class="busy">reading the statistics</div>
+  </section>
+
+  <section id="featured">
+    <h2 class="group">What the statistics found</h2>
+    <div id="feat" class="busy">looking at the statistics</div>
+  </section>
+</main>
+
+<script src="site.js"></script>
+<script>
+// The two doors carry a count each, so the split is not just a pair of
+// buttons: it says how much is behind them before you click.
+for (const [rules, id] of [["mate", "mateCount"], ["capture", "capCount"]])
+  fetch("api/coverage?rules=" + rules + "&men=5")
+    .then(r => r.json())
+    .then(d => {
+      const boards = d.rows.reduce((a, m) => a + m.boards.length, 0);
+      el(id).textContent = d.stored.toLocaleString() + " of "
+                         + d.materials.toLocaleString() + " materials, "
+                         + boards.toLocaleString() + " tables";
+    })
+    .catch(() => { el(id).textContent = "server not reachable"; });
+
+// The interesting positions, taken from the statistics file rather than from
+// anything solved here: the server reads it per request, so a sweep running
+// beside the server shows up on a reload.
+const KIND = {
+  deepest:  "deepest quiet win",
+  shrinks:  "shorter on a bigger board",
+  reversal: "no quiet win exists",
+  never:    "White never wins it",
+  always:   "won from every placement",
+};
+
+fetch("api/interesting")
+  .then(r => r.json())
+  .then(d => {
+    const sum = el("sum");
+    sum.className = "";
+    const S = d.summary;
+    if (S && S.rows) {
+      const big = (x) => x.toLocaleString();
+      const sci = (x) => x >= 1e9 ? (x / 1e9).toFixed(1) + " billion" : big(x);
+      sum.innerHTML = `
+        <div class="cards">
+          <div class="card"><div class="label">${big(S.configurations)}</div>
+            <div class="title">configurations</div>
+            <div class="blurb">distinct material, each solved on every board in range</div></div>
+          <div class="card"><div class="label">${big(S.rows)}</div>
+            <div class="title">tables measured</div>
+            <div class="blurb">one per configuration and board, n = ${S.minN}..${S.maxN}</div></div>
+          <div class="card"><div class="label">${sci(S.positions)}</div>
+            <div class="title">positions</div>
+            <div class="blurb">legal placements counted across every table</div></div>
+          <div class="card"><div class="label">${S.deepest} ply</div>
+            <div class="title">deepest win</div>
+            <div class="blurb">${S.deepestConfig} on ${S.deepestN} x ${S.deepestN};
+              ${big(S.alwaysWon)} materials are won from every placement</div></div>
+        </div>
+        <p class="sub" style="margin-top:14px">` +
+        S.families.map(f => `${f.name}: ${big(f.rows)}`).join(" &middot; ") +
+        `</p>
+        <p class="sub">` + [
+          S.shrinking ? `${big(S.shrinking)} materials whose win gets SHORTER on a bigger board` : "",
+          S.neverWon ? `${big(S.neverWon)} White never wins on any board` : "",
+          S.reversals ? `${big(S.reversals)} won often but never from a quiet position` : "",
+        ].filter(x => x).join(" &middot; ") + `</p>
+        <p class="sub">measured under both rule sets separately: ` +
+        `${big(S.mateRows || 0)} normal-chess tables, ` +
+        `${big(S.captureRows || 0)} capture-rules tables</p>`;
+    } else {
+      sum.innerHTML = '<p class="sub">No statistics file is loaded. Start the server with '
+        + '<code>--stats FILE</code> to see what has been solved.</p>';
+    }
+
+    const feat = el("feat");
+    feat.className = "";
+    if (!d.positions || !d.positions.length) {
+      feat.innerHTML = '<p class="sub">No statistics to draw on yet. Generate some with '
+        + '<code>egtb kings --white W --black B --min 3 --max N --stats-csv FILE</code> '
+        + 'and start the server with <code>--stats FILE</code>.</p>';
+      return;
+    }
+    feat.innerHTML = `<div class="cards">
+      ${d.positions.map(p => {
+        // A card with no position names a configuration rather than a
+        // placement: nothing is won there, so there is no winning position to
+        // link to and the explorer chooses what to show.
+        const href = "board.html?f=" + encodeURIComponent(p.family) + "&n=" + p.n
+                   + (p.pos ? "&pos=" + encodeURIComponent(p.pos) + "&stm=" + p.stm : "");
+        const [w, b] = p.config.split("v");
+        return `
+        <a class="card" href="${href}">
+          <div class="label">${p.config} &middot; n = ${p.n}</div>
+          <div class="glyphs">${glyphs(w, b)}</div>
+          <div class="title">${p.pos || "open it and see what the table holds"}</div>
+          <div class="blurb">${p.why}</div>
+          <div class="meta">
+            <span class="tag ${p.rules === "capture" ? "cap" : "mate"}">${
+              p.rules === "capture" ? "capture rules" : "normal chess"}</span>
+            ${KIND[p.kind] ? `<span class="tag on">${KIND[p.kind]}</span>` : ""}
+            <span class="tag">${p.positions.toLocaleString()} placements</span>
+            ${p.deepest ? `<span class="tag">deepest ${p.deepest} ply</span>` : ""}
+          </div>
+        </a>`; }).join("")}
+    </div>`;
+  })
+  .catch(e => {
+    el("feat").className = "err";
+    el("feat").textContent = "could not read the statistics: " + e;
+  });
+</script>
